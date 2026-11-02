@@ -1,0 +1,92 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用 LOL 赛事助手",
+    "hint": "总开关。关闭后不响应任何指令，也不做定时推送。",
+    "default": true
+  },
+  "default_provider": {
+    "type": "string",
+    "description": "默认数据源",
+    "hint": "scoregg = 玩加赛事（无需密钥，中文队名，推荐）；pandascore = PandaScore（需要 Key，字段规范、有服务承诺）。写错按 scoregg 处理。",
+    "default": "scoregg"
+  },
+  "pandascore_token": {
+    "type": "string",
+    "description": "PandaScore API Key（默认值）",
+    "hint": "所有会话共用的兜底 Key。留空时只能用 scoregg。申请方法见仓库 docs/pandascore.md：注册后免费 Fixtures 档 1000 请求/小时足够一个机器人用。",
+    "default": ""
+  },
+  "allow_session_token": {
+    "type": "bool",
+    "description": "允许会话自定义 Key",
+    "hint": "开启后群管理可以在会话里用「/lol 设置 key xxx」覆盖默认 Key。多人共用同一个机器人时建议开启，便于分摊配额。",
+    "default": true
+  },
+  "push_time": {
+    "type": "string",
+    "description": "默认推送时间",
+    "hint": "格式 HH:MM，例如 23:00。每个会话可以用「/lol 提醒 时间 22:30」单独改。",
+    "default": "23:00"
+  },
+  "default_windows": {
+    "type": "string",
+    "description": "默认可提醒时段",
+    "hint": "格式 08:00-23:30，多个大写分隔，支持跨零点（22:00-06:00）和工作日前缀（工作日 09:00-18:00）。留空 = 全天可提醒。",
+    "default": "08:00-23:30"
+  },
+  "default_mention": {
+    "type": "string",
+    "description": "默认提醒方式",
+    "hint": "none = 不 @ 任何人；all = @全体成员（需要机器人有群管理权限，否则自动降级为普通消息）；list = @ 下面「默认 @ 名单」里的人。",
+    "default": "none"
+  },
+  "default_mention_targets": {
+    "type": "list",
+    "description": "默认 @ 名单",
+    "hint": "填写用户 ID（不是昵称）。只有「默认提醒方式 = list」时生效。会话里可以用「/lol 提醒 加 @某人」覆盖这份名单。",
+    "default": []
+  },
+  "admin_ids": {
+    "type": "list",
+    "description": "管理员用户 ID",
+    "hint": "可以改推送时间、改数据源、清空订阅的人。留空 = 不限制（仅建议单人群使用）。",
+    "default": []
+  },
+  "subscribe_limit": {
+    "type": "int",
+    "description": "单会话可订阅联赛数",
+    "hint": "防止一个群把所有联赛都订阅了，导致每晚刷屏。默认 3。",
+    "default": 3
+  },
+  "week_match_days": {
+    "type": "int",
+    "description": "「本周」展示天数",
+    "hint": "scoregg 的周列表固定返回 7 天，这里只控制显示前 N 天，默认 7。",
+    "default": 7
+  },
+  "max_matches_per_day": {
+    "type": "int",
+    "description": "每天最多显示场次",
+    "hint": "超过这个数量截断并提示剩余场次，避免一条消息太长。默认 20。",
+    "default": 20
+  },
+  "request_timeout": {
+    "type": "int",
+    "description": "接口超时（秒）",
+    "hint": "单次 HTTP 请求的超时时间。网络差可以调到 20。",
+    "default": 12
+  },
+  "holiday_fetch_date": {
+    "type": "string",
+    "description": "次年节假日开放日",
+    "hint": "国务院一般在每年 10 月底到 11 月公布次年放假安排。到这一天起每天尝试拉一次，拿到就停手。格式 MM-DD，默认 11-01。",
+    "default": "11-01"
+  },
+  "debug": {
+    "type": "bool",
+    "description": "输出调试日志",
+    "hint": "排查数据源问题时打开，会打印每次请求的接口与耗时。",
+    "default": false
+  }
+}

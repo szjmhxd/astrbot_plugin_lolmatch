@@ -1,0 +1,17 @@
+name: astrbot_plugin_lolmatch
+display_name: LOL 赛事助手
+desc: 查询英雄联盟职业赛事（LPL/LCK/世界赛等）的赛程、赛果与单场数据，支持订阅联赛后每晚自动推送当日战报与次日赛程，可 @全体 或 @指定人提醒，并可按「工作日 / 休息日」限定可提醒时段。
+short_desc: 查 LOL 职业赛事赛程赛果，订阅后按时段推送并 @提醒
+version: v1.0.0
+author: szjm
+repo: https://github.com/szjmhxd/astrbot_plugin_lolmatch
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - kook
+  - telegram
+  - discord
+  - lark
+  - dingtalk
+  - slack
+  - wecom
