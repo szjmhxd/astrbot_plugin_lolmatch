@@ -171,6 +171,104 @@ class PlayerStat:
 
 
 @dataclass(slots=True)
+class DragonEvent:
+    """一条龙（元素龙 / 大龙）被击杀的时刻。
+
+    只有取到 LPL 官方直播数据（``lol/livedata``）的场次才有这串事件，
+    所以整条时间线是**可选**的，没有就整块不画。
+
+    ``kind`` 是源站自己的编号，只用来挑图标（``images/lol/dragon/icon1-{kind}.png``）。
+    **不做中文翻译**：这个编号与英雄联盟官方的龙种编号对不上（源站前端那套
+    iconfont 类名跟实际数据矛盾，比如 15 分钟就出现「远古龙」），
+    猜错了比不写更糟，所以卡片上就是源站那张图。
+    """
+
+    second: int = 0
+    clock: str = ""  # 06:07
+    side: str = ""  # "a" / "b"，拿龙的一方
+    kind: int = -1
+    icon: str = ""
+
+
+@dataclass(slots=True)
+class TeamFight:
+    """一次团战的起止时间，时间线中间那条轨用。"""
+
+    begin: int = 0
+    end: int = 0
+    begin_clock: str = ""
+    end_clock: str = ""
+
+    @property
+    def mid(self) -> int:
+        return (self.begin + self.end) // 2
+
+
+@dataclass(slots=True)
+class H2HGame:
+    """一场历史交手（整体场次，不是其中某一局）。"""
+
+    date: str = ""  # 2026-07-12
+    match_id: str = ""
+    title: str = ""  # 2026 MSI季中赛-淘汰赛 07-12 14:00
+    team_a: str = ""
+    team_b: str = ""
+    score_a: int = 0
+    score_b: int = 0
+
+    @property
+    def winner(self) -> str:
+        if self.score_a > self.score_b:
+            return self.team_a
+        if self.score_b > self.score_a:
+            return self.team_b
+        return ""
+
+    @property
+    def score_line(self) -> str:
+        return f"{self.team_a} {self.score_a}:{self.score_b} {self.team_b}"
+
+    @property
+    def event(self) -> str:
+        """赛事名。标题形如「2026 MSI季中赛-淘汰赛 07-12 14:00」，砍掉尾部日期。"""
+        parts = self.title.rsplit(" ", 2)
+        if len(parts) == 3 and ":" in parts[2]:
+            return parts[0] or "—"
+        return self.title or "—"
+
+
+@dataclass(slots=True)
+class HeadToHead:
+    """两队的交手记录。
+
+    ``wins_a`` / ``wins_b`` 已经统一到**当前这场比赛**的 a / b 侧——
+    源站每条记录的 a/b 是按那场比赛自己的主客排的，不归一化就会出现
+    「同一支队伍一会儿 a 一会儿 b」的混乱。
+    """
+
+    team_a: str = ""
+    team_b: str = ""
+    wins_a: int = 0
+    wins_b: int = 0
+    games: list[H2HGame] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.games) or self.wins_a or self.wins_b
+
+    @property
+    def score_line(self) -> str:
+        return f"{self.wins_a} : {self.wins_b}"
+
+    @property
+    def count(self) -> int:
+        return len(self.games) or (self.wins_a + self.wins_b)
+
+    def recent(self, limit: int = 3) -> list[H2HGame]:
+        return self.games[:limit] if limit > 0 else self.games
+
+
+@dataclass(slots=True)
 class Game:
     """BO 里的单局。"""
 
@@ -211,6 +309,13 @@ class Game:
     flag_a: str = ""
     flag_b: str = ""
     detailed: bool = False  # 是否取到了逐局明细
+    # 时间线（只有 LPL 官方直播数据有的场次才有，没有就是空列表）
+    dragons: list[DragonEvent] = field(default_factory=list)
+    fights: list[TeamFight] = field(default_factory=list)
+
+    @property
+    def timeline_ready(self) -> bool:
+        return bool(self.dragons or self.fights)
 
     @property
     def winner_text(self) -> str:
@@ -236,6 +341,7 @@ class MatchDetail:
     match: Match = field(default_factory=Match)
     games: list[Game] = field(default_factory=list)
     extra: dict[str, str] = field(default_factory=dict)
+    h2h: HeadToHead | None = None
 
 
 @dataclass(slots=True)

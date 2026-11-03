@@ -8,3 +8,6 @@ venv/
 *.zip
 *.log
 .DS_Store
+
+# 本地渲染验证时的图标缓存
+_icontest/

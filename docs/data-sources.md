@@ -11,6 +11,8 @@
 | 英雄中文名 | Riot Data Dragon `zh_CN` | 无 | 退回英文 ID |
 | 源站英雄编号 → 英雄名 | 本地自学习（由 scoregg 数据养成） | — | 显示 `—` / `？` |
 | 法定节假日、调休 | `NateScarlet/holiday-cn` | 无 | 退化为「周一到周五」 |
+| 历史交手记录 | `img.scoregg.com/match_pre/{matchID}.json` | 无 | 不显示交手区块 |
+| 小龙 / 团战时间线 | `img.scoregg.com/lol/livedata/**`（LPL 官方直播数据） | 无 | 不画时间线，其余照常 |
 | 队标、英雄头像、装备、召唤师技能、符文图标 | `img.scoregg.com`（图片卡片用） | 无 | 跳过该图，卡片照画 |
 
 除 PandaScore 外全部无需注册、无需付费。四类数据互不依赖：英雄表拉不到不影响赛程，节假日缺失只影响提醒的时间判断。
@@ -167,6 +169,80 @@ summoner spell ID（4 = 闪现、12 = 传送、11 = 惩戒 …），跨版本稳
 | `items` | `{side}_star_{x}_equip_1..8`（**只有图标地址，没有道具 ID**） |
 | `spells` / `spell_icons` | `{side}_{slot}_skill_1..2`（注意键里没有 `star_`） |
 | `perks` | `data.perks[]` 按 `playerID` 匹配 |
+
+### 历史交手：赛前分析 JSON
+
+```
+GET https://img.scoregg.com/match_pre/{matchID}.json
+```
+
+静态 CDN，无需鉴权。这是比赛页「赛前分析」面板的数据源，一份响应里带着
+`strength_index`（实力指数）、`match_record`（近 6 次交手）、
+`match_record_a` / `match_record_b`（双方各自近 6 场战绩）。
+
+插件只用 `match_record`：
+
+```
+match_record = {
+  team_a_win_count: 1,
+  team_b_win_count: 2,
+  list: [{ win_team_id, win_team_name, start_time, matchID, title,
+           teamID_a, teamID_b, team_a_short_name, team_b_short_name,
+           team_a_win, team_b_win, result_list[] }]
+}
+```
+
+**`team_a_win_count` 的 a / b 指的是「当前这场比赛」的 a / b**，但 `list[]` 里每条的
+`team_a_short_name` 是**那场比赛自己**的主客排法——两者不一定同向。
+实测 59531：当前 a = HLE，而 07-12 那条记录把 BLG 排在左边。
+所以解析时必须先归一化（左队不是当前 a 队就整条对调），否则同一支队伍的胜负
+会一半记在左、一半记在右。
+
+对已结束的比赛，这个文件仍是**赛前生成的快照**，不含本场——正好就是「交手记录」要的东西。
+
+### 小龙时间线：LPL 官方直播数据
+
+两段取数：
+
+```
+GET https://img.scoregg.com/lol/livedata/{matchID}.json     # 局列表
+GET <该局的 web_url>                                        # 事件流
+```
+
+局列表每项形如：
+
+```
+{ status, blue_clan_name, red_clan_name, blue_teamID, red_teamID,
+  win_teamID, web_url, url, source }
+```
+
+`status = 1` 表示这局有完整数据，`-1` 表示没有（此时 `web_url` 为空）。
+`web_url` 通常指向 `lol/livedata/2/{livedata_key}.json`。
+
+事件流里有用的两块：
+
+| 数据 | 字段 | 结构 |
+|---|---|---|
+| 小龙击杀 | `team_a.dragons[]` / `team_b.dragons[]` | `{dragon_type, game_time, game_time_txt, dragon_image}` |
+| 团战区间 | `team_battle[]` | `{seq, begin_time, end_time, begin_time_txt, end_time_txt, data[]}` |
+
+**关键坑：`group_id` 和 `groupId` 是互为镜像的两个字段。**
+`groupId` 是自己所在的分组（100 = 蓝方，200 = 红方），`group_id` 是**对方**的分组。
+取错的话双方拿龙记录整片对调。
+
+**元素龙只取两队的 `dragons[]`，不要用顶层 `dragon_event[]`。**
+顶层那个混着别的东西：59531 的第 1 局里，15:17 有一条 `dragon_type=6`、
+36:11 有一条 `dragon_type=0`，两条都不计入任何一方的元素龙数（`small_dargon` 3:4）。
+照单全画会出现「时间线上 5 条龙、资源格写着 3 条」的自相矛盾。
+两队的 `dragons[]` 才是源站自己统计过的口径，跟 `small_dargon` 天然一致。
+
+**`dragon_type` 不当名字用。** 源站前端那份 iconfont 映射（0 = 大龙、1 = 火龙、
+2 = 风龙、3 = 土龙、4 = 水龙、5 = 小龙、6 = 远古龙）与实际数据矛盾——
+按它念，15:17 就会出现「远古龙」。所以卡片只按编号取图标
+（`images/lol/dragon/icon1-{type}.png`，1/2/3 张图实测都有），文字版只写时刻。
+
+**覆盖范围有限**：只有录到官方直播数据的局才有时间线。同一场比赛可能
+第 1 局有、第 2 局没有（59531 就是这样），代码按局序号对齐，对不上就整块不画。
 
 ### 备源：PandaScore
 

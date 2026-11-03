@@ -48,6 +48,7 @@ RED = "#f85149"
 RED_BG = "#3a1a1c"
 WIN = "#e3b341"
 GREEN = "#3fb950"
+FIGHT = "#a16207"  # 团战标记，暗金——比灰显眼、又不抢红蓝的注意力
 
 WIDTH = 880
 PAD = 22
@@ -296,6 +297,7 @@ def _collect_urls(matches: list[Match], games: list[Game]) -> list[str]:
         urls.extend([match.flag_a, match.flag_b])
     for game in games:
         urls.extend([game.flag_a, game.flag_b])
+        urls.extend(event.icon for event in game.dragons)
         for player in (*game.players_a, *game.players_b):
             urls.append(player.hero_icon)
             urls.extend(player.spell_icons)
@@ -389,6 +391,101 @@ def schedule_card(
 # ---------------------------------------------------------------- 比赛摘要卡
 
 
+H2H_ROW = 22
+
+
+def _h2h_panel(canvas: Canvas, h2h: Any, top: float) -> float:
+    """历史交手的紧凑面板，返回结束时的 y。
+
+    队名按胜负分色：赢的一方用金色、输的一方压暗。比分用中性色——
+    两段都染色反而看不出谁赢了。
+
+    只列最近 3 场：面板是给「这场有没有心理优势」这个问题用的，
+    不是战绩档案馆，六场会把后面逐局表挤得没地方。
+    """
+    rows = h2h.recent(3)
+    height = 26 + len(rows) * H2H_ROW + 10
+    canvas.rrect(PAD, top, WIDTH - PAD * 2, height, radius=10, fill=PANEL)
+
+    canvas.text(PAD + 14, top + 8, f"近 {h2h.count} 次交手", 11, fill=DIM)
+
+    # 总比分右对齐排一行。先各自测宽再从右往左退，避免拼接时左右间距不等。
+    name_size, score_size, gap = 13, 14, 10
+    right = WIDTH - PAD - 14
+    name_b = canvas.measure(h2h.team_b, name_size, bold=True)
+    score = f"{h2h.wins_a} : {h2h.wins_b}"
+    score_w = canvas.measure(score, score_size, bold=True)
+    name_a = canvas.measure(h2h.team_a, name_size, bold=True)
+
+    x_b = right - name_b
+    x_score = x_b - gap - score_w
+    x_a = x_score - gap - name_a
+    canvas.text(
+        x_a,
+        top + 8,
+        h2h.team_a,
+        name_size,
+        bold=True,
+        fill=WIN if h2h.wins_a > h2h.wins_b else MUTED,
+    )
+    canvas.text(x_score, top + 7, score, score_size, bold=True, fill=INK)
+    canvas.text(
+        x_b,
+        top + 8,
+        h2h.team_b,
+        name_size,
+        bold=True,
+        fill=WIN if h2h.wins_b > h2h.wins_a else MUTED,
+    )
+
+    y = top + 26
+    for game in rows:
+        canvas.text(PAD + 14, y + 3, game.date[5:], 10, fill=MUTED)
+        x = PAD + 62
+        a_win = game.score_a > game.score_b
+        canvas.text(x, y, game.team_a, 12, bold=True, fill=WIN if a_win else DIM)
+        x += canvas.measure(game.team_a, 12, bold=True) + 7
+        score_text = f"{game.score_a}:{game.score_b}"
+        canvas.text(x, y + 1, score_text, 11, fill=INK)
+        x += canvas.measure(score_text, 11) + 7
+        canvas.text(x, y, game.team_b, 12, bold=True, fill=DIM if a_win else WIN)
+        canvas.text(
+            PAD + 224,
+            y + 3,
+            canvas.fit(game.event, 10, WIDTH - PAD - 224 - 14),
+            10,
+            fill=DIM,
+        )
+        y += H2H_ROW
+    return top + height + 10
+
+
+def _h2h_line(canvas: Canvas, h2h: Any, top: float) -> float:
+    """单局卡上的交手摘要，一行纯文字，返回结束时的 y。
+
+    不套底色：上面那行「蓝 BLG ｜ 红 HLE」也是纯文字，中间夹一条独立色块
+    会显得像没做完的组件。整块的高度也就 22，画底反而更挤。
+
+    左边给总比分（谁占上风），右边压进最近三场的场次比分（连胜还是互有胜负）。
+    """
+    canvas.text(PAD + 2, top + 4, "交手", 9, fill=DIM)
+
+    x = PAD + 36
+    size = 11
+    a_lead = h2h.wins_a > h2h.wins_b
+    canvas.text(x, top + 2, h2h.team_a, size, bold=True, fill=WIN if a_lead else MUTED)
+    x += canvas.measure(h2h.team_a, size, bold=True) + 6
+    score = f"{h2h.wins_a}:{h2h.wins_b}"
+    canvas.text(x, top + 2, score, size, bold=True, fill=INK)
+    x += canvas.measure(score, size, bold=True) + 6
+    canvas.text(x, top + 2, h2h.team_b, size, bold=True, fill=MUTED if a_lead else WIN)
+
+    recent = "　".join(f"{game.date[5:]} {game.score_a}:{game.score_b}" for game in h2h.recent(3))
+    if recent:
+        canvas.text_right(WIDTH - PAD, top + 4, f"近 {h2h.count} 场　{recent}", 9, fill=DIM)
+    return top + 22
+
+
 def match_card(
     fonts: Fonts, icons: dict[str, bytes], detail: MatchDetail, *, source: str = ""
 ) -> bytes | None:
@@ -397,7 +494,9 @@ def match_card(
         return None
     match = detail.match
     games = detail.games
-    height = PAD + 40 + 118 + 36 + len(games) * 32 + 30 + PAD
+    h2h = detail.h2h if detail.h2h is not None and detail.h2h.ready else None
+    h2h_block = 26 + len(h2h.recent(3)) * H2H_ROW + 10 + 10 if h2h else 0
+    height = PAD + 40 + 118 + h2h_block + 36 + len(games) * 32 + 30 + PAD
     canvas = Canvas(fonts, WIDTH, height)
 
     subtitle = " · ".join(
@@ -452,11 +551,13 @@ def match_card(
     when = " ".join(part for part in (match.start_date, match.start_time) if part)
     canvas.text(WIDTH / 2, top + 82, when, 12, fill=MUTED, anchor="mt")
 
-    # 逐局简表
+    # 逐局简表（有交手记录就先垫一块）
     y = top + 122
+    if h2h:
+        y = _h2h_panel(canvas, h2h, y)
     columns = (
-        ("局", PAD + 8, "lt"),
-        ("胜方", PAD + 68, "lt"),
+        ("局", PAD + 14, "lt"),
+        ("胜方", PAD + 72, "lt"),
         ("时长", PAD + 130, "lt"),
         ("击杀", PAD + 210, "lt"),
         ("经济", PAD + 300, "lt"),
@@ -500,6 +601,112 @@ PLAYER_ROW = 30
 PLAYER_SUB = 22
 TEAM_HEAD = 30
 
+TIMELINE_H = 100  # 单层轨道的高度，多一层加 18
+TIMELINE_LAYER = 18
+DRAGON = 16
+
+
+def _timeline_layers(game: Game) -> int:
+    """这一局的时间线需要几层（1 或 2）。
+
+    只有同一侧两条龙挨得比图标还近时才需要错层——大多数比赛是一层。
+    先算出来再画，而不是一律按两层留白：那样没有密集龙的局会顶出一大块空白，
+    看着像是图裂了。
+    """
+    total = max(1, game.duration_sec)
+    span = WIDTH - PAD - 16 - (PAD + 46)
+    peak = 0
+    for side in ("a", "b"):
+        previous: int | None = None
+        layer = 0
+        for event in (e for e in game.dragons if e.side == side):
+            if previous is not None and (event.second - previous) / total * span < DRAGON + 2:
+                layer = 1 - layer
+            else:
+                layer = 0
+            peak = max(peak, layer)
+            previous = event.second
+    return 2 if peak else 1
+
+
+def timeline_height(game: Game) -> float:
+    return TIMELINE_H + (_timeline_layers(game) - 1) * TIMELINE_LAYER
+
+
+def _timeline_panel(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    game: Game,
+    match: Match,
+    top: float,
+) -> float:
+    """蓝 / 红双轨的龙击杀时间线，外面套一块底板，返回结束时的 y。
+
+    比源站那张好在两处：
+
+    1. 队伍竖着标在两条轨的左端，谁拿的不靠颜色猜；
+    2. 同一侧两枚图标时间挨太近时自动换一行，不会叠成一坨——源站那张是直接盖上去的。
+
+    团战画成轴下方一条暗轨 + 点亮段，不画成图标：十几根竖条挤在一起会跟龙图标
+    抢注意力，而且看不出是「团战」还是「另一条龙」。
+
+    只取两队 ``dragons`` 列表里的元素龙，不取顶层 ``dragon_event``：
+    后者混着大龙和其他事件，照单全画会出现「时间线上 5 条龙、资源格写着 3 条」
+    这种自相矛盾的画面。图标只按源站编号取图，不做中文名——编号与官方龙种对不上。
+    """
+    layers = _timeline_layers(game)
+    height = TIMELINE_H + (layers - 1) * TIMELINE_LAYER
+    canvas.rrect(PAD, top, WIDTH - PAD * 2, height, radius=10, fill=PANEL)
+
+    total = max(1, game.duration_sec)
+    left = PAD + 46
+    right = WIDTH - PAD - 16
+    span = right - left
+    mid = top + 34 + (layers - 1) * TIMELINE_LAYER
+
+    def x_of(second: int) -> float:
+        return left + min(1.0, max(0.0, second / total)) * span
+
+    # 主轴 + 每 10 分钟一根刻度
+    canvas.line(left, mid, right, mid, fill=LINE)
+    minutes = 0
+    while minutes * 60 <= total:
+        x = x_of(minutes * 60)
+        canvas.line(x, mid - 3, x, mid + 3, fill=DIM)
+        canvas.text(x, mid + 46, f"{minutes:02d}", 9, fill=DIM, anchor="mt")
+        minutes += 10
+
+    # 团战：先铺一条贯通的暗轨，再把有团战的时段点亮。
+    # 直接画十几根独立小条会变成一串「沙粒」，读者得逐个去猜，读不出节奏。
+    canvas.rrect(left, mid + 2, span, 3, radius=1.5, fill=PANEL_2)
+    for fight in game.fights:
+        start = x_of(fight.begin)
+        end = max(start + 2, x_of(fight.end))
+        canvas.rrect(start, mid + 2, end - start, 3, radius=1.5, fill=FIGHT)
+
+    canvas.text_right(
+        PAD + 40, mid - 21, canvas.fit(match.team_a or "?", 10, 38), 10, bold=True, fill=BLUE
+    )
+    canvas.text_right(
+        PAD + 40, mid + 11, canvas.fit(match.team_b or "?", 10, 38), 10, bold=True, fill=RED
+    )
+
+    for side in ("a", "b"):
+        events = [event for event in game.dragons if event.side == side]
+        previous: float | None = None
+        layer = 0
+        for event in events:
+            x = x_of(event.second)
+            crowded = previous is not None and x - previous < DRAGON + 2
+            layer = 1 - layer if crowded else 0
+            previous = x
+            if side == "a":
+                y = mid - 24 - layer * TIMELINE_LAYER
+            else:
+                y = mid + 8 + layer * TIMELINE_LAYER
+            canvas.icon(x - DRAGON / 2, y, DRAGON, icons.get(event.icon), radius=3)
+    return top + height
+
 
 def _player_rows(fonts: Fonts) -> float:
     return PLAYER_ROW + PLAYER_SUB
@@ -527,7 +734,9 @@ def game_card(
         + 34  # 顶部标题
         + 66  # 比分区
         + 18  # 蓝红方那一行
+        + (28 if detail.h2h is not None and detail.h2h.ready else 0)  # 交手一条
         + 68  # 资源网格（2 行）
+        + (timeline_height(game) + 18 if game.timeline_ready else 0)
         + (30 if has_first else 0)
         + (56 if has_bans else 0)
         + sum(TEAM_HEAD + 26 + len(squad) * _player_rows(fonts) + 12 for _, squad, _ in squads)
@@ -589,6 +798,12 @@ def game_card(
     if win_side:
         canvas.text_right(WIDTH - PAD, y, win_side, 10, fill=WIN)
     y += 18
+
+    h2h = detail.h2h if detail.h2h is not None and detail.h2h.ready else None
+    if h2h:
+        y = _h2h_line(canvas, h2h, y)
+        y += 6
+
     pairs = [
         ("击杀", game.kills_a, game.kills_b, False),
         ("经济", game.gold_a, game.gold_b, True),
@@ -629,6 +844,12 @@ def game_card(
             anchor="lt",
         )
     y += 34 * 2 + 6
+
+    # 龙线（只有拿到官方直播数据的局才有）
+    if game.timeline_ready:
+        y += 10
+        y = _timeline_panel(canvas, icons, game, match, y)
+        y += 8
 
     # 里程碑
     if has_first:

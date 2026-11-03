@@ -33,12 +33,16 @@ import aiohttp
 
 from ._log import logger
 from .models import (
+    DragonEvent,
     Game,
+    H2HGame,
+    HeadToHead,
     Match,
     MatchDetail,
     PerkSet,
     PlayerStat,
     ProviderError,
+    TeamFight,
     Tournament,
 )
 from .spells import spell_pairs as spell_pairs_of
@@ -48,6 +52,17 @@ API = "https://www.scoregg.com/services/api_url.php"
 # 逐局明细单独放在 CDN 上，跟 api_url.php 不是一个域名，也不需要任何参数：
 # BP 禁选、推塔/先锋/巢虫/远古龙、每名选手的经济/补刀/伤害占比/参团率都在里面。
 GAME_STATS_API = "https://img.scoregg.com/match/result/{}.json"
+
+# 赛前分析：历史交手、实力对比、双方近 6 场战绩。同样是静态 CDN，GET 直取。
+# 对已结束的比赛它仍是赛前生成的快照（不含本场），这正好就是「交手记录」要的东西。
+MATCH_PRE_API = "https://img.scoregg.com/match_pre/{}.json"
+
+# LPL 官方直播数据：先取局列表（每局带 web_url），再按 web_url 取事件流。
+# 小龙/大龙击杀时刻、团战区间、击杀点位、经济曲线都在这份数据里。
+LIVEDATA_API = "https://img.scoregg.com/lol/livedata/{}.json"
+
+# 龙图标。1..6 是元素龙，0 是大龙。编号只用于取图，不当名字用。
+DRAGON_ICON = "https://img.scoregg.com/images/lol/dragon/icon1-{}.png"
 
 # 站点前端固定带的参数，缺了会 404 或返回空
 BASE_PARAMS: dict[str, Any] = {
@@ -367,10 +382,15 @@ class ScoreggProvider:
 
         games: list[Game] = []
         result_ids: list[str] = []
+        match_team_a = str(data.get("teamID_a") or "")
+        match_team_b = str(data.get("teamID_b") or "")
+
+        # 交手记录和时间线跟逐局明细互不依赖，三路并发，别串行等。
+        pre_task = asyncio.ensure_future(self._match_pre(match_id, match.team_a, match.team_b))
+        live_task = asyncio.ensure_future(self._livedata(match_id))
+
         results = data.get("result_list")
         if isinstance(results, list):
-            match_team_a = str(data.get("teamID_a") or "")
-            match_team_b = str(data.get("teamID_b") or "")
             for index, raw in enumerate(results, start=1):
                 if not isinstance(raw, dict):
                     continue
@@ -420,34 +440,247 @@ class ScoreggProvider:
                 for game, blob in pairs:
                     self._fill_perks(game, blob)
 
+        # 时间线只对「有官方直播数据」的局有效，按局序贴上去；对不上就跳过。
+        try:
+            timeline = await live_task
+        except Exception as exc:  # noqa: BLE001 时间线是锦上添花，不该拖垮整场
+            logger.debug(f"[LOL赛事] 直播数据 {match_id} 取不到：{type(exc).__name__}: {exc}")
+            timeline = []
+        self._fill_timelines(games, timeline, match_team_a, match_team_b)
+
+        h2h: HeadToHead | None = None
+        try:
+            h2h = await pre_task
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[LOL赛事] 赛前分析 {match_id} 取不到：{type(exc).__name__}: {exc}")
+        if h2h is not None:
+            h2h.team_a = h2h.team_a or match.team_a
+            h2h.team_b = h2h.team_b or match.team_b
+
         logger.debug(f"[LOL赛事] scoregg 详情 {match_id}：{len(games)} 局")
         if self._book is not None:
             await self._book.save()
-        return MatchDetail(match=match, games=games)
+        return MatchDetail(match=match, games=games, h2h=h2h)
 
-    async def _game_stats(self, result_id: str) -> dict[str, Any]:
-        """取单局明细。失败一律返回空 dict，让上层退回精简统计，不丢整场。
+    async def _cdn(self, url: str) -> Any:
+        """CDN 上的静态 JSON（逐局明细、赛前分析、直播数据都走这里）。
 
-        注意这个端点不在 ``api_url.php`` 后面，是静态 CDN，所以也不需要
-        ``api_path`` 那套参数，直接 GET 就行。
+        这些数据都是「有则更好」：取不到返回 ``None``，让调用方保留已有字段，
+        绝不能因为一个可选端点挂了就整场查不到。
+
+        注意两个域名的 ``code`` 类型不一样——``api_url.php`` 给字符串 ``"200"``，
+        CDN 给整数 ``200``，所以统一转成字符串再比。
         """
-        if not result_id or result_id == "0":
-            return {}
+        if not url:
+            return None
         session = await self._http()
-        url = GAME_STATS_API.format(result_id)
         try:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    logger.debug(f"[LOL赛事] 逐局明细 {result_id} 返回 HTTP {resp.status}")
-                    return {}
+                    logger.debug(f"[LOL赛事] {url} 返回 HTTP {resp.status}")
+                    return None
                 body = await resp.json(content_type=None)
         except (TimeoutError, aiohttp.ClientError, ValueError) as exc:
-            logger.debug(f"[LOL赛事] 逐局明细 {result_id} 取不到：{type(exc).__name__}: {exc}")
-            return {}
+            logger.debug(f"[LOL赛事] {url} 取不到：{type(exc).__name__}: {exc}")
+            return None
         if not isinstance(body, dict) or str(body.get("code")) != "200":
+            return None
+        return body.get("data")
+
+    async def _game_stats(self, result_id: str) -> dict[str, Any]:
+        """取单局明细，失败一律返回空 dict，让上层退回精简统计，不丢整场。"""
+        if not result_id or result_id == "0":
             return {}
-        data = body.get("data")
+        data = await self._cdn(GAME_STATS_API.format(result_id))
         return data if isinstance(data, dict) else {}
+
+    async def _match_pre(self, match_id: str, team_a: str, team_b: str) -> HeadToHead | None:
+        """赛前分析里的历史交手。
+
+        ``match_record`` 给的是「近 6 次交手」——每场带着**那场比赛自己**的
+        a / b 侧，与当前这场的主客顺序不一定一致，所以要先归一化到当前 a / b，
+        否则同一支队伍的胜负会一半记在左边、一半记在右边。
+        """
+        blob = await self._cdn(MATCH_PRE_API.format(match_id))
+        if not isinstance(blob, dict):
+            return None
+        record = blob.get("match_record")
+        if not isinstance(record, dict):
+            return None
+
+        games: list[H2HGame] = []
+        for item in record.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            name_a = str(item.get("team_a_short_name") or "")
+            name_b = str(item.get("team_b_short_name") or "")
+            score_a = _int(item.get("team_a_win"))
+            score_b = _int(item.get("team_b_win"))
+            # 这一场把当前 b 队排在左边 → 整条记录左右对调
+            if team_a and name_a and name_a != team_a and name_b == team_a:
+                name_a, name_b = name_b, name_a
+                score_a, score_b = score_b, score_a
+            games.append(
+                H2HGame(
+                    date=str(item.get("start_time") or ""),
+                    match_id=str(item.get("matchID") or ""),
+                    title=str(item.get("title") or ""),
+                    team_a=name_a,
+                    team_b=name_b,
+                    score_a=score_a,
+                    score_b=score_b,
+                )
+            )
+
+        if not games:
+            # 没有明细时至少还能给出总胜负，源站这两个计数就是按当前 a / b 给的
+            wins_a = _int(record.get("team_a_win_count"))
+            wins_b = _int(record.get("team_b_win_count"))
+            if not (wins_a or wins_b):
+                return None
+            return HeadToHead(team_a=team_a, team_b=team_b, wins_a=wins_a, wins_b=wins_b)
+
+        return HeadToHead(
+            team_a=team_a,
+            team_b=team_b,
+            wins_a=sum(1 for game in games if game.winner == team_a),
+            wins_b=sum(1 for game in games if game.winner == team_b),
+            games=games,
+        )
+
+    async def _livedata(self, match_id: str) -> list[dict[str, Any]]:
+        """LPL 官方直播数据：小龙 / 大龙击杀时刻、团战区间、击杀点位。
+
+        两段取数：先要局列表（每局一个 ``web_url``），再并发取每局的事件流。
+        返回与**局序对齐**的列表，某一局没有数据就是空 dict，位置不错乱。
+        """
+        listing = await self._cdn(LIVEDATA_API.format(match_id))
+        if not isinstance(listing, list) or not listing:
+            return []
+
+        urls = [
+            str(item.get("web_url") or item.get("url") or "") if isinstance(item, dict) else ""
+            for item in listing
+        ]
+        blobs = await asyncio.gather(*(self._cdn(url) for url in urls), return_exceptions=True)
+        out: list[dict[str, Any]] = []
+        for meta, blob in zip(listing, blobs, strict=False):
+            if isinstance(blob, dict) and blob:
+                out.append({"meta": meta if isinstance(meta, dict) else {}, "blob": blob})
+            else:
+                out.append({})
+        return out
+
+    def _fill_timelines(
+        self,
+        games: list[Game],
+        timeline: list[dict[str, Any]],
+        match_team_a: str,
+        match_team_b: str,
+    ) -> None:
+        """把直播事件按局序贴到每一局上。
+
+        局序校验：直播数据每局都说「谁赢了」，与逐局列表对不上就说明两个序列
+        错位了（比如中间有弃权局）。这种情况下**宁可不画时间线**，
+        也不能把某一局的小龙挂到另一局头上。
+        """
+        for index, game in enumerate(games):
+            if index >= len(timeline) or not timeline[index]:
+                continue
+            entry = timeline[index]
+            meta = entry.get("meta") or {}
+            blob = entry.get("blob") or {}
+            win_id = str(meta.get("win_teamID") or "")
+            expected = ""
+            if win_id and match_team_a and win_id == match_team_a:
+                expected = "a"
+            elif win_id and match_team_b and win_id == match_team_b:
+                expected = "b"
+            if expected and game.win_side and expected != game.win_side:
+                logger.debug(f"[LOL赛事] 第 {game.index} 局直播数据与逐局列表对不上，跳过时间线")
+                continue
+            self._fill_one_timeline(game, meta, blob, match_team_a, match_team_b)
+
+    def _fill_one_timeline(
+        self,
+        game: Game,
+        meta: dict[str, Any],
+        blob: dict[str, Any],
+        match_team_a: str,
+        match_team_b: str,
+    ) -> None:
+        raw_game = blob.get("game")
+        if not isinstance(raw_game, dict):
+            raw_game = {}
+
+        # a 侧这场是蓝还是红。直播数据用 clan 分组（100 蓝 / 200 红）。
+        blue_id = str(meta.get("blue_teamID") or "")
+        if blue_id and match_team_a:
+            a_is_blue = blue_id == match_team_a
+        elif blue_id and match_team_b:
+            a_is_blue = blue_id != match_team_b
+        else:
+            a_is_blue = True
+
+        def side_of(group: int) -> str:
+            return "a" if (group == 100) == a_is_blue else "b"
+
+        # 元素龙只取双方 dragons 列表，不取顶层的 dragon_event。
+        #
+        # 那个顶层列表混着别的东西：这场里 15:17 有一条 dragon_type=6、36:11 有一条
+        # dragon_type=0，两条都不计入任何一方的元素龙数（3:4）。照单全画会让
+        # 时间线上有 5 条龙、资源格却写着 3 条，读者第一反应是数据错了。
+        # 两队的列表才是源站自己统计过的口径，跟计数天然一致。
+        events: list[DragonEvent] = []
+        for key in ("team_a", "team_b"):
+            block = blob.get(key)
+            if not isinstance(block, dict):
+                continue
+            # 注意是 ``groupId``（自己所在分组），不是 ``group_id``——
+            # 后者是**对方**的分组，两个字段在同一份数据里互为镜像，取错就全反了。
+            group = _int(block.get("groupId") or block.get("group_id"))
+            side = side_of(group)
+            for item in block.get("dragons") or []:
+                if not isinstance(item, dict):
+                    continue
+                kind = _int(item.get("dragon_type"))
+                events.append(
+                    DragonEvent(
+                        second=_int(item.get("game_time")),
+                        clock=str(item.get("game_time_txt") or ""),
+                        side=side,
+                        kind=kind,
+                        icon=str(item.get("dragon_image") or "")
+                        or (DRAGON_ICON.format(kind) if kind >= 0 else ""),
+                    )
+                )
+        events.sort(key=lambda event: event.second)
+
+        fights: list[TeamFight] = []
+        for item in blob.get("team_battle") or []:
+            if not isinstance(item, dict):
+                continue
+            begin = _int(item.get("begin_time"))
+            end = _int(item.get("end_time"))
+            if not end and not begin:
+                continue
+            fights.append(
+                TeamFight(
+                    begin=begin,
+                    end=end or begin,
+                    begin_clock=str(item.get("begin_time_txt") or ""),
+                    end_clock=str(item.get("end_time_txt") or ""),
+                )
+            )
+        fights.sort(key=lambda fight: fight.begin)
+
+        game.dragons = events
+        game.fights = fights
+        if not game.duration_sec:
+            total = _int(raw_game.get("game_time"))
+            if total:
+                game.duration_sec = total
+                game.duration_min = total // 60
 
     def _enrich(
         self,

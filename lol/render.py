@@ -166,6 +166,10 @@ def detail_report(
         lines.append(when)
     lines.append("")
 
+    h2h = _h2h_block(detail)
+    if h2h:
+        lines.extend(h2h)
+
     if not detail.games:
         note = detail.extra.get("note") or "这场比赛还没有逐局数据。"
         lines.append(note)
@@ -245,6 +249,8 @@ def _game_block(
     if first:
         lines.append(f"  {first}")
 
+    lines.extend(_timeline_lines(game, match))
+
     for bans, label in ((game.bans_a, match.team_a), (game.bans_b, match.team_b)):
         # 认出来的太少就整行不显示——「？ ？ ？」在群里只是噪音；
         # 认出一部分才用「？」占位，保证五个 Ban 的位置不错位
@@ -260,6 +266,43 @@ def _game_block(
             continue
         lines.extend(_squad_block(squad, label, champ, full=full))
     return lines
+
+
+def _h2h_block(detail: MatchDetail) -> list[str]:
+    """历史交手段。只列最近 3 场——群里没人要翻完 6 场。"""
+    h2h = detail.h2h
+    if h2h is None or not h2h.ready:
+        return []
+    lines = [f"【交手】{h2h.team_a} {h2h.score_line} {h2h.team_b}（近 {h2h.count} 场）"]
+    for game in h2h.recent(3):
+        lines.append(f"  {_pad(game.date[5:], 6)}{_pad(game.score_line, 16)}{game.event}")
+    lines.append("")
+    return lines
+
+
+def _timeline_lines(game: Game, match: Match) -> list[str]:
+    """小龙 / 大龙击杀时刻，按队伍分行。
+
+    源站只给「几分几秒、哪一方拿的」，种类编号与官方对不上，所以这里只写时刻、
+    不猜龙种；卡片上才有图标。拿不到直播数据的局整块不显示，不占版面。
+    """
+    if not game.timeline_ready:
+        return []
+    out: list[str] = []
+    for side in ("a", "b"):
+        events = [event for event in game.dragons if event.side == side]
+        if not events:
+            continue
+        team = (match.team_a if side == "a" else match.team_b) or "—"
+        head = "龙线" if not out else "　　"
+        out.append(f"  {head} {_pad(team, 8)}{' '.join(event.clock for event in events)}")
+    if game.fights:
+        tail = f"　团战 {len(game.fights)} 次"
+        if out:
+            out[-1] += tail
+        else:
+            out.append(f"  {tail.strip()}")
+    return out
 
 
 def _first_line(game: Game, match: Match) -> str:
