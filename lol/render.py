@@ -10,7 +10,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Callable
 
-from .models import Match, MatchDetail, Tournament, status_icon, status_text
+from .models import Game, Match, MatchDetail, Tournament, status_icon, status_text
 from .windows import window_text
 
 _Champ = Callable[[str, str], str]
@@ -124,7 +124,14 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
 # ---------------------------------------------------------------------- 详情
 
 
-def detail_report(detail: MatchDetail, *, champ: _Champ = _champ_default, source: str = "") -> str:
+def detail_report(
+    detail: MatchDetail,
+    *,
+    champ: _Champ = _champ_default,
+    source: str = "",
+    only: int = 0,
+) -> str:
+    """单场详情。``only`` 大于 0 时只看那一局（BO5 时避免刷屏）。"""
     match = detail.match
     lines: list[str] = []
 
@@ -151,38 +158,85 @@ def detail_report(detail: MatchDetail, *, champ: _Champ = _champ_default, source
             lines.append(f"\n数据源 {source}")
         return "\n".join(lines).strip()
 
-    for game in detail.games:
-        winner = {"a": match.team_a, "b": match.team_b}.get(game.win_side, "")
-        head = f"第 {game.index} 局"
-        if winner:
-            head += f" · {winner} 胜"
-        if game.duration_min:
-            head += f" · {game.duration_min} 分钟"
-        lines.append(head)
-        lines.append(
-            f"  击杀 {game.kills_a} : {game.kills_b}　"
-            f"经济 {_gold(game.gold_a)} : {_gold(game.gold_b)}"
-        )
-        lines.append(
-            f"  大龙 {game.baron_a} : {game.baron_b}　小龙 {game.dragon_a} : {game.dragon_b}"
-        )
-        for squad, label in (
-            (game.players_a, match.team_a),
-            (game.players_b, match.team_b),
-        ):
-            if not squad:
-                continue
-            lines.append(f"  {label}")
-            for player in squad:
-                name = _pad(player.nickname, 12)
-                hero = _pad(champ(player.hero_id, player.champion), 12)
-                flag = " ★MVP" if player.mvp else ""
-                lines.append(f"    {name}{hero}{player.kda}{flag}")
+    games = [g for g in detail.games if not only or g.index == only]
+    if not games:
+        lines.append(f"这场 BO{match.best_of or len(detail.games)} 没有第 {only} 局。")
+        return "\n".join(lines).strip()
+
+    for game in games:
+        lines.extend(_game_block(game, match, champ))
         lines.append("")
 
     if source:
         lines.append(f"数据源 {source}")
     return "\n".join(lines).strip()
+
+
+def _game_block(game: Game, match: Match, champ: _Champ) -> list[str]:
+    """一局的完整呈现：局面、双方资源、BP、双方选手。"""
+    winner = {"a": match.team_a, "b": match.team_b}.get(game.win_side, "")
+    head = f"第 {game.index} 局"
+    if winner:
+        head += f" · {winner} 胜"
+    if game.clock:
+        head += f" · {game.clock}"
+    lines = [head]
+    if game.sides:
+        lines.append(f"  {game.sides}")
+
+    stats = [f"击杀 {game.kills_a} : {game.kills_b}"]
+    if game.enriched:  # 没取到逐局明细时推塔是 0，不能当成真 0 显示
+        stats.append(f"推塔 {game.tower_a} : {game.tower_b}")
+    stats.append(f"经济 {_gold(game.gold_a)} : {_gold(game.gold_b)}")
+    lines.append("  " + "　".join(stats))
+
+    objectives = [
+        f"小龙 {game.dragon_a} : {game.dragon_b}",
+        f"大龙 {game.baron_a} : {game.baron_b}",
+    ]
+    # 这些只有逐局明细里才有，全是 0 就不占版面
+    if game.herald_a or game.herald_b:
+        objectives.append(f"先锋 {game.herald_a} : {game.herald_b}")
+    if game.grub_a or game.grub_b:
+        objectives.append(f"巢虫 {game.grub_a} : {game.grub_b}")
+    if game.elder_a or game.elder_b:
+        objectives.append(f"远古 {game.elder_a} : {game.elder_b}")
+    lines.append("  " + "　".join(objectives))
+
+    for bans, label in ((game.bans_a, match.team_a), (game.bans_b, match.team_b)):
+        # 认出来的太少就整行不显示——「？ ？ ？」在群里只是噪音；
+        # 认出一部分才用「？」占位，保证五个 Ban 的位置不错位
+        if sum(1 for name in bans if name) < 3:
+            continue
+        lines.append(f"  禁 {label}：{' '.join(name or '？' for name in bans)}")
+
+    for squad, label in (
+        (game.players_a, match.team_a),
+        (game.players_b, match.team_b),
+    ):
+        if not squad:
+            continue
+        # 没有逐局明细时经济、伤害都是空的，就别摆两列「—」
+        rich = any(player.gold or player.damage_pct for player in squad)
+        lines.append(f"  {label}")
+        header = "    " + _pad("选手", 13) + _pad("英雄", 13) + _pad("KDA", 9)
+        lines.append((header + (_pad("经济", 7) + "伤害" if rich else "")).rstrip())
+        for player in squad:
+            row = (
+                f"    {_pad(player.nickname, 13)}"
+                f"{_pad(champ(player.hero_id, player.champion), 13)}"
+                f"{_pad(player.kda, 9)}"
+            )
+            if rich:
+                row += _pad(_gold(player.gold) if player.gold else "—", 7)
+                if player.damage_pct:
+                    row += f"{player.damage_pct:.0f}%"
+            if player.mvp:
+                row += " ★MVP"
+            elif player.beiguo:
+                row += " 背锅"
+            lines.append(row.rstrip())
+    return lines
 
 
 # ---------------------------------------------------------------------- 联赛
@@ -216,7 +270,8 @@ def help_text(prefix: str = "/lol") -> str:
             f"{prefix} 本周        未来 7 天",
             f"{prefix} 联赛        进行中/即将开始的联赛与 ID",
             f"{prefix} 联赛详情 <ID>   该联赛近期场次",
-            f"{prefix} 详情 <比赛ID>   单场逐局数据（KDA/经济/大小龙/选手）",
+            f"{prefix} 详情 <比赛ID>   单场逐局数据（BP/推塔/选手经济伤害）",
+            f"{prefix} 详情 <比赛ID> <局号>  只看其中一局",
             "",
             "【订阅推送】",
             f"{prefix} 订阅 <联赛ID>     每晚推送当日战报 + 次日赛程",

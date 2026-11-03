@@ -393,7 +393,9 @@ class LolMatchPlugin(Star):
             "detail", provider=conf["provider"], token=conf["token"], match_id=token
         )
         champ = self._champions.resolve if self._champions else (lambda _hid, tok: tok or "—")
-        return render.detail_report(detail, champ=champ, source=self._label(used))
+        # 第二个参数看单局：BO5 全列出来太长，可以只查其中一局
+        only = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else 0
+        return render.detail_report(detail, champ=champ, source=self._label(used), only=only)
 
     async def _cmd_tournaments(self, umo: str) -> str:
         conf = self._effective(umo)

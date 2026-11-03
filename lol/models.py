@@ -101,6 +101,14 @@ class PlayerStat:
     deaths: int = 0
     assists: int = 0
     mvp: bool = False
+    # 下面这些只有取到逐局明细时才有值，渲染层按「有就显示」处理
+    gold: int = 0
+    cs: int = 0  # 补刀（hits）
+    damage: int = 0  # 对英雄伤害
+    damage_pct: float = 0.0  # 伤害占全队比例（0~100）
+    part: float = 0.0  # 参团率（0~100）
+    score: float = 0.0  # 数据源给的评分
+    beiguo: bool = False  # 全场最差，源站叫「背锅」
 
     @property
     def kda(self) -> str:
@@ -124,10 +132,38 @@ class Game:
     duration_min: int = 0
     players_a: list[PlayerStat] = field(default_factory=list)
     players_b: list[PlayerStat] = field(default_factory=list)
+    # 逐局明细（没有时留空，渲染层跳过这些行）
+    duration_sec: int = 0
+    sides: str = ""  # 如「蓝 BLG ｜ 红 HLE」，缺失为空
+    tower_a: int = 0
+    tower_b: int = 0
+    herald_a: int = 0
+    herald_b: int = 0
+    grub_a: int = 0
+    grub_b: int = 0
+    elder_a: int = 0
+    elder_b: int = 0
+    damage_a: int = 0
+    damage_b: int = 0
+    bans_a: list[str] = field(default_factory=list)
+    bans_b: list[str] = field(default_factory=list)
+    detailed: bool = False  # 是否取到了逐局明细
 
     @property
     def winner_text(self) -> str:
         return "A 方" if self.win_side == "a" else ("B 方" if self.win_side == "b" else "")
+
+    @property
+    def clock(self) -> str:
+        """时长，``41:51`` 这种。没有秒数就退化成 ``41 分钟``。"""
+        if self.duration_sec:
+            return f"{self.duration_sec // 60}:{self.duration_sec % 60:02d}"
+        return f"{self.duration_min} 分钟" if self.duration_min else ""
+
+    @property
+    def enriched(self) -> bool:
+        """是否取到了逐局明细（BP、推塔、选手经济等）。"""
+        return self.detailed
 
 
 @dataclass(slots=True)

@@ -103,6 +103,17 @@ class ChampionBook:
             return ""
         return self._by_id.get(raw) or self._by_key.get(raw) or raw
 
+    def by_ddragon(self, key: str) -> str:
+        """Data Dragon 的数字 key：``84`` → 离群之刺。"""
+        return self._by_key.get(str(key or "").strip(), "")
+
+    def by_source(self, source_id: str) -> str:
+        """数据源自己的英雄编号：``101`` → 暗黑元首（靠打过多场比赛学到）。"""
+        raw = str(source_id or "").strip()
+        if not raw:
+            return ""
+        return self.name(self._hero_ids.get(raw, ""))
+
     def resolve(self, hero_id: str, token: str) -> str:
         """优先用英文 ID；拿不到就用编号反查。都失败给一个占位符。"""
         raw = str(token or "").strip()
