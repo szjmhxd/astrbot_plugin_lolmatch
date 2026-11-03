@@ -13,6 +13,8 @@
 | 法定节假日、调休 | `NateScarlet/holiday-cn` | 无 | 退化为「周一到周五」 |
 | 历史交手记录 | `img.scoregg.com/match_pre/{matchID}.json` | 无 | 不显示交手区块 |
 | 小龙 / 团战时间线 | `img.scoregg.com/lol/livedata/**`（LPL 官方直播数据） | 无 | 不画时间线，其余照常 |
+| 比赛阶段（入围赛/瑞士轮/淘汰赛） | `web_math_list.php` 的 `round_name` | 无 | 归到「赛程」一组 |
+| 晋级图（对阵树） | **没有可用来源**，见下文 | — | 不提供 |
 | 队标、英雄头像、装备、召唤师技能、符文图标 | `img.scoregg.com`（图片卡片用） | 无 | 跳过该图，卡片照画 |
 
 除 PandaScore 外全部无需注册、无需付费。四类数据互不依赖：英雄表拉不到不影响赛程，节假日缺失只影响提醒的时间判断。
@@ -169,6 +171,38 @@ summoner spell ID（4 = 闪现、12 = 传送、11 = 惩戒 …），跨版本稳
 | `items` | `{side}_star_{x}_equip_1..8`（**只有图标地址，没有道具 ID**） |
 | `spells` / `spell_icons` | `{side}_{slot}_skill_1..2`（注意键里没有 `star_`） |
 | `perks` | `data.perks[]` 按 `playerID` 匹配 |
+
+### 赛程窗口：一次只回 7 天
+
+`web_math_list.php` 无论传什么，一次都只回 7 天，键是 `2026.11.02` 这种格式：
+
+| 参数 | 实际行为 |
+|---|---|
+| 都不传 | 今天往后的 7 天 |
+| `date=D` | **`[D-3, D+3]` 这 7 天**——`date` 是窗口锚点，不是单日过滤 |
+| `tournament_id=X` | 只含该联赛，窗口仍是 7 天 |
+
+所以「只看某一天」必须自己按日期过滤（`_window(filter_day=True)`），而「看整个
+联赛」得按联赛起止日期切锚点分几次拉再按 `match_id` 去重
+（`_tournament_schedule`，最多 8 段 ≈ 56 天）。
+
+这条以前记错过——文档写的是「传 `date` 只回那一天」，导致联赛详情实际只能看到
+一周，已结束的赛事常常只回 2 场。实测（2026-11）：
+`tournament_id=987&date=2026-07-12` 返回 07-06 ~ 07-12 共 8 场，不是 1 场。
+
+### 晋级图：源站没有
+
+翻过 `/match_pc?tournamentID=` 的页面与 `match_pc.packed.js`，结论是**做不了**：
+
+| 想拿的东西 | 结论 |
+|---|---|
+| 轮次细分（八强 / 四强 / 决赛） | 没有。`round_name` 只到「入围赛 / 瑞士轮 / 淘汰赛」这一层 |
+| 对阵树 / bracket 接口 | 没有。盲探 `web_tournament_vs.php` 等一批路径全是 404 |
+| `rounds-menu-wrap` 那套轮次菜单 | 是按轮次**筛选列表**的标签页，不是树；数据来自 `moreGame/round_match_list.php`，还必须带上 `roundID` + `round_son_id` 才知道拉哪一段 |
+| `team_point_list`（积分/晋级榜） | 嵌在联赛页 HTML 的 `php_data` 里，**不是接口**。形状还不固定：1023 是按 `roundID` 分组的 dict，987 是空 list |
+
+按日期自己连线画树等于编造晋级关系，所以不做；「联赛详情」改用「阶段 → 日期」
+分组，阶段内的先后与比分都是真实的。
 
 ### 历史交手：赛前分析 JSON
 
@@ -369,6 +403,7 @@ https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json
 | Leaguepedia | 数据最全，但限流策略严苛，机房 IP 基本被直接拒绝 |
 | `esports.op.gg` | 有可用的 GraphQL 赛程与双版队标，但**没有逐局数据**，撑不起「详情」；且返回时间为 UTC |
 | `static.lolesports.com` 队标 | 路径无规律，只能猜中个别战队，覆盖率不可用。改用 scoregg 自带的 `team_a_image`（480–500px 透明底，主流联赛覆盖完整） |
+| scoregg 晋级图 | 轮次只到「入围赛/瑞士轮/淘汰赛」，没有对阵树接口，积分榜只嵌在页面 HTML 里且形状不固定。详见「晋级图：源站没有」 |
 
 ## 七、换源要动哪些文件
 

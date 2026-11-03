@@ -10,10 +10,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 # 赛事状态：0 未开始 / 1 进行中 / 2 已结束
 STATUS_TEXT = ("未开始", "进行中", "已结束")
 STATUS_ICON = ("🕐", "🔴", "✅")
+
+_WEEKDAY = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def day_label(day: str, *, with_year: bool = False) -> str:
+    """``2026-10-26`` → ``10-26 周一``。
+
+    带星期是因为赛程密集时「10-26 和 10-27 哪场在前」一眼看不出来，
+    加上周几读起来快得多。日期解析不了就原样返回，别让渲染层炸掉。
+    """
+    text = (day or "").strip()
+    try:
+        parsed = date.fromisoformat(text[:10])
+    except ValueError:
+        return text or "—"
+    head = parsed.isoformat() if with_year else parsed.strftime("%m-%d")
+    return f"{head} {_WEEKDAY[parsed.weekday()]}"
+
+
+def stage_groups(matches: list[Match]) -> list[tuple[str, list[Match]]]:
+    """按「比赛阶段」分组，顺序即首次出现的先后（赛程本身已按日期排好）。
+
+    源站的 ``round_name`` 只给到「入围赛 / 瑞士轮 / 淘汰赛」这一层，
+    没有八强四强决赛的细分——所以这就是阶段能拿到的全部信息。
+    """
+    groups: dict[str, list[Match]] = {}
+    for match in matches:
+        groups.setdefault(match.round_name or "赛程", []).append(match)
+    return list(groups.items())
 
 
 def status_text(status: int) -> str:

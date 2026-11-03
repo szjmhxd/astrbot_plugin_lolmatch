@@ -34,7 +34,7 @@ from astrbot.api.star import Context, Star, StarTools
 from .lol import render
 from .lol.card import CardRenderer
 from .lol.champions import ChampionBook
-from .lol.models import ProviderError
+from .lol.models import ProviderError, day_label, stage_groups
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
 from .lol.store import SessionStore
@@ -418,7 +418,10 @@ class LolMatchPlugin(Star):
     async def _schedule_cards(self, title: str, matches, limit: int, source: str) -> list[bytes]:
         if self._cards is None or not self._cards.available or not matches:
             return []
-        png = await self._cards.schedule(title=title, matches=matches, limit=limit, source=source)
+        subtitle = f"只列前 {limit} 场" if limit > 0 and len(matches) > limit else ""
+        png = await self._cards.schedule(
+            title=title, matches=matches, limit=limit, source=source, subtitle=subtitle
+        )
         return [png] if png else []
 
     async def _cmd_detail(self, umo: str, rest: list[str]) -> str | tuple[str, list[bytes]]:
@@ -466,7 +469,7 @@ class LolMatchPlugin(Star):
         )
         return render.tournament_list(items, source=self._label(used))
 
-    async def _cmd_tournament(self, umo: str, rest: list[str]) -> str:
+    async def _cmd_tournament(self, umo: str, rest: list[str]) -> str | tuple[str, list[bytes]]:
         token = rest[0] if rest else ""
         if not token.isdigit():
             return f"用法：{_CMD} 联赛详情 <联赛ID>（先用「{_CMD} 联赛」查 ID）"
@@ -478,16 +481,46 @@ class LolMatchPlugin(Star):
             token=conf["token"],
             tournament_id=token,
         )
+        name = (matches[0].tournament_name if matches else "") or f"联赛 {token}"
+        label = self._label(used)
         if not matches:
-            return f"联赛 {token} 近期没有排期。"
-        name = matches[0].tournament_name or f"联赛 {token}"
-        return render.day_report(
-            name,
-            matches,
-            title=f"联赛详情 · {name}",
-            limit=self._cfg_int("max_matches_per_day", 20) * 3,
-            source=self._label(used),
+            return f"🏆 {name}\n\n这个联赛还没有排期数据。　数据源 {label}"
+
+        text = render.tournament_report(name, matches, source=label)
+        images = await self._tournament_cards(name, matches, label)
+        if images:
+            return self._tournament_brief(name, matches, label), images
+        return text
+
+    def _tournament_brief(self, name: str, matches, source: str) -> str:
+        """配图时只留一句概括——编号和日期都在图上，不再重复念一遍列表。"""
+        days = sorted({m.start_date for m in matches if m.start_date})
+        if len(days) > 1:
+            span = f"{days[0][5:]} ~ {days[-1][5:]}"
+        else:
+            span = day_label(days[0]) if days else ""
+        stages = stage_groups(matches)
+        brief = f"🏆 {name}　{span}　共 {len(matches)} 场"
+        if len(stages) > 1:
+            brief += f" · {'／'.join(label for label, _ in stages)}"
+        return f"{brief}　数据源 {source}"
+
+    async def _tournament_cards(self, name: str, matches, source: str) -> list[bytes]:
+        if self._cards is None or not self._cards.available:
+            return []
+        limit = self._cfg_int("tournament_card_limit", 36)
+        days = sorted({m.start_date for m in matches if m.start_date})
+        subtitle = f"{days[0][5:]} ~ {days[-1][5:]}" if len(days) > 1 else ""
+        if len(matches) > limit:
+            subtitle = f"{subtitle}　只列前 {limit} 场".strip()
+        png = await self._cards.tournament(
+            title=f"LOL 联赛详情 · {name}",
+            matches=matches,
+            subtitle=subtitle,
+            limit=limit,
+            source=source,
         )
+        return [png] if png else []
 
     # ------------------------------------------------------------------ 订阅
 

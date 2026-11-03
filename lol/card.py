@@ -22,7 +22,7 @@ import io
 from pathlib import Path
 from typing import Any
 
-from .models import Game, Match, MatchDetail, PlayerStat
+from .models import Game, Match, MatchDetail, PlayerStat, day_label, stage_groups
 
 try:
     from PIL import Image, ImageChops, ImageDraw, ImageFont
@@ -307,12 +307,106 @@ def _collect_urls(matches: list[Match], games: list[Game]) -> list[str]:
 
 # ---------------------------------------------------------------- 赛程卡
 
+HEAD_MAJOR = 26  # 阶段 / 联赛标题
+HEAD_MINOR = 22  # 日期小标题
+ROW_H = 46
+ROW_ID_H = 54  # 多一行比赛 ID
 
-def _schedule_rows(matches: list[Match], limit: int) -> list[tuple[str, list[Match]]]:
-    grouped: dict[str, list[Match]] = {}
-    for match in matches[:limit] if limit > 0 else matches:
-        grouped.setdefault(match.tournament_name or "其他联赛", []).append(match)
-    return list(grouped.items())
+
+def _schedule_blocks(matches: list[Match], limit: int, *, group: str) -> list[tuple[int, Any]]:
+    """摊平成「标题 + 数据行」的序列。``level``：0 大标题 / 1 日期 / -1 一场比赛。
+
+    两种分组都从同一份数据来，只是切法不同：
+    ``tournament`` 按「日期 + 联赛」，``stage`` 按「阶段 → 日期」。
+    """
+    shown = matches[:limit] if limit > 0 else matches
+    blocks: list[tuple[int, Any]] = []
+
+    if group == "stage":
+        for label, items in stage_groups(shown):
+            blocks.append((0, label))
+            day = ""
+            for match in items:
+                if match.start_date != day:
+                    day = match.start_date
+                    blocks.append((1, day_label(day)))
+                blocks.append((-1, match))
+        return blocks
+
+    # 跨天的列表把日期提到标题上，单天的就只留联赛名——否则每块都在重复
+    # 标题里已经写过的那个日期。
+    days = {m.start_date for m in shown}
+    grouped: dict[tuple[str, str], list[Match]] = {}
+    for match in shown:
+        key = (match.start_date, match.tournament_name or "其他联赛")
+        grouped.setdefault(key, []).append(match)
+    for (day, tournament), items in grouped.items():
+        head = f"{day_label(day)}　{tournament}" if len(days) > 1 else f"【{tournament}】"
+        blocks.append((0, head))
+        blocks.extend((-1, match) for match in items)
+    return blocks
+
+
+def _schedule_row(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    match: Match,
+    y: float,
+    *,
+    show_id: bool = False,
+) -> None:
+    """一场比赛的条。左边时刻（可选再带一行比赛 ID），中间比分，两侧队标。"""
+    height = ROW_ID_H if show_id else ROW_H
+    canvas.rrect(PAD, y, WIDTH - PAD * 2, height - 4, radius=8, fill=PANEL)
+    clock_y = y + 9 if show_id else y + 12
+    canvas.text(PAD + 14, clock_y, match.start_time or "--:--", 15, fill=INK, bold=True)
+    if show_id:
+        # 11px + MUTED：聊天软件会把长图整体缩小，DIM 灰的 10px 缩完就看不清了，
+        # 而这行编号正是「联赛详情」这张卡存在的理由之一。
+        canvas.text(PAD + 14, y + 31, f"#{match.id}", 11, fill=MUTED)
+    tag = f"BO{match.best_of}" if match.best_of else ""
+    if tag:
+        canvas.text(PAD + 66, y + 15, tag, 10, fill=DIM)
+    canvas.icon(
+        PAD + 96,
+        y + 10 if show_id else y + 8,
+        26,
+        icons.get(match.flag_a),
+        placeholder=match.team_a[:2],
+        size_hint=9,
+        bg=PANEL_2,
+    )
+    canvas.text(
+        PAD + 130,
+        y + 14 if show_id else y + 12,
+        canvas.fit(match.team_a or "?", 15, 200),
+        15,
+    )
+    middle = match.score_line if match.started else "vs"
+    canvas.text(
+        WIDTH / 2,
+        y + 14 if show_id else y + 12,
+        middle,
+        15,
+        fill=WIN if match.finished else MUTED,
+        bold=match.finished,
+        anchor="mt",
+    )
+    canvas.text_right(
+        WIDTH - PAD - 48,
+        y + 14 if show_id else y + 12,
+        canvas.fit(match.team_b or "?", 15, 200),
+        15,
+    )
+    canvas.icon(
+        WIDTH - PAD - 40,
+        y + 10 if show_id else y + 8,
+        26,
+        icons.get(match.flag_b),
+        placeholder=match.team_b[:2],
+        size_hint=9,
+        bg=PANEL_2,
+    )
 
 
 def schedule_card(
@@ -323,65 +417,44 @@ def schedule_card(
     matches: list[Match],
     limit: int = 20,
     source: str = "",
+    subtitle: str = "",
+    show_id: bool = False,
+    group: str = "tournament",
 ) -> bytes | None:
-    """今日 / 本周赛程。一行一场，队标 26px。"""
+    """今日 / 本周 / 联赛详情共用一张卡，只是分组方式和副标题不同。"""
     if not fonts.available:
         return None
-    groups = _schedule_rows(matches, limit)
-    rows = sum(len(items) for _, items in groups)
-    height = PAD + 44 + len(groups) * 26 + rows * 46 + 26 + PAD
+    blocks = _schedule_blocks(matches, limit, group=group)
+    row_h = ROW_ID_H if show_id else ROW_H
+    body = sum(
+        HEAD_MAJOR if level == 0 else HEAD_MINOR if level == 1 else row_h for level, _ in blocks
+    )
+    head_h = 44 + (22 if subtitle else 0)
+    height = PAD + head_h + max(body, 40) + 26 + PAD
     canvas = Canvas(fonts, WIDTH, height)
 
     canvas.text(PAD, PAD, title, 24, bold=True)
     canvas.text_right(WIDTH - PAD, PAD + 8, f"共 {len(matches)} 场", 13, fill=MUTED)
 
     y = PAD + 44
-    if not groups:
+    if subtitle:
+        canvas.text(PAD, y, subtitle, 12, fill=MUTED)
+        y += 22
+    if not blocks:
         canvas.text(PAD, y + 10, "这一天没有比赛。", 16, fill=MUTED)
         return canvas.to_bytes()
 
-    for tournament, items in groups:
-        canvas.text(PAD, y, f"【{tournament}】", 14, fill=BLUE, bold=True)
-        y += 26
-        for match in items:
-            canvas.rrect(PAD, y, WIDTH - PAD * 2, 42, radius=8, fill=PANEL)
-            canvas.text(PAD + 14, y + 12, match.start_time or "--:--", 15, fill=INK, bold=True)
-            tag = f"BO{match.best_of}" if match.best_of else ""
-            if tag:
-                canvas.text(PAD + 66, y + 15, tag, 10, fill=DIM)
-            canvas.icon(
-                PAD + 96,
-                y + 8,
-                26,
-                icons.get(match.flag_a),
-                placeholder=match.team_a[:2],
-                size_hint=9,
-                bg=PANEL_2,
-            )
-            canvas.text(PAD + 130, y + 12, canvas.fit(match.team_a or "?", 15, 200), 15)
-            middle = match.score_line if match.started else "vs"
-            canvas.text(
-                WIDTH / 2,
-                y + 12,
-                middle,
-                15,
-                fill=WIN if match.finished else MUTED,
-                bold=match.finished,
-                anchor="mt",
-            )
-            canvas.text_right(
-                WIDTH - PAD - 48, y + 12, canvas.fit(match.team_b or "?", 15, 200), 15
-            )
-            canvas.icon(
-                WIDTH - PAD - 40,
-                y + 8,
-                26,
-                icons.get(match.flag_b),
-                placeholder=match.team_b[:2],
-                size_hint=9,
-                bg=PANEL_2,
-            )
-            y += 46
+    for level, item in blocks:
+        if level == 0:
+            # 联赛详情里阶段是主角，用金色；赛程卡里联赛名只是分组，蓝色就够
+            canvas.text(PAD, y + 4, item, 14, fill=WIN if group == "stage" else BLUE, bold=True)
+            y += HEAD_MAJOR
+        elif level == 1:
+            canvas.text(PAD + 4, y + 2, item, 12, fill=MUTED)
+            y += HEAD_MINOR
+        else:
+            _schedule_row(canvas, icons, item, y, show_id=show_id)
+            y += row_h
 
     if source:
         canvas.text(PAD, height - PAD - 14, f"数据源 {source}", 11, fill=DIM)
@@ -1049,7 +1122,13 @@ class CardRenderer:
             logger.warning(f"[LOL赛事] 卡片渲染不可用，改用纯文字{detail}")
 
     async def schedule(
-        self, *, title: str, matches: list[Match], limit: int = 20, source: str = ""
+        self,
+        *,
+        title: str,
+        matches: list[Match],
+        limit: int = 20,
+        source: str = "",
+        subtitle: str = "",
     ) -> bytes | None:
         if not self.available:
             self._fail()
@@ -1057,7 +1136,43 @@ class CardRenderer:
         try:
             icons = await self.store.warm(_collect_urls(matches, []))
             return schedule_card(
-                self.fonts, icons, title=title, matches=matches, limit=limit, source=source
+                self.fonts,
+                icons,
+                title=title,
+                matches=matches,
+                limit=limit,
+                source=source,
+                subtitle=subtitle,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            return None
+
+    async def tournament(
+        self,
+        *,
+        title: str,
+        matches: list[Match],
+        subtitle: str = "",
+        limit: int = 40,
+        source: str = "",
+    ) -> bytes | None:
+        """联赛详情卡：阶段 → 日期，每场带比赛 ID。"""
+        if not self.available:
+            self._fail()
+            return None
+        try:
+            icons = await self.store.warm(_collect_urls(matches, []))
+            return schedule_card(
+                self.fonts,
+                icons,
+                title=title,
+                matches=matches,
+                limit=limit,
+                source=source,
+                subtitle=subtitle,
+                show_id=True,
+                group="stage",
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)

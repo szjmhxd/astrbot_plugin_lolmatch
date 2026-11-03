@@ -16,6 +16,8 @@ from .models import (
     MatchDetail,
     PlayerStat,
     Tournament,
+    day_label,
+    stage_groups,
     status_icon,
     status_text,
 )
@@ -45,9 +47,18 @@ def _gold(value: int) -> str:
     return f"{value / 1000:.1f}k"
 
 
-def _line(match: Match, *, show_tournament: bool = False) -> str:
+def _line(
+    match: Match,
+    *,
+    show_tournament: bool = False,
+    show_date: bool = False,
+    show_id: bool = False,
+) -> str:
     icon = status_icon(match.status)
     clock = match.start_time or "--:--"
+    if show_date and match.start_date:
+        # 只有跨天的列表才需要日期，否则每一行都在重复标题里的那天
+        clock = f"{match.start_date[5:]} {clock}"
     if match.started:
         score = f"{match.team_a} {match.score_line} {match.team_b}"
     else:
@@ -55,6 +66,8 @@ def _line(match: Match, *, show_tournament: bool = False) -> str:
     extra = f"BO{match.best_of}" if match.best_of else ""
     if match.finished and match.winner:
         extra = f"{extra} · {match.winner} 胜".strip(" ·")
+    if show_id and match.id:
+        extra = f"{extra}  #{match.id}".strip()
     tail = f"  {extra}" if extra else ""
     head = f"{icon} {clock}  {score}"
     if show_tournament and match.tournament_name:
@@ -86,7 +99,7 @@ def day_report(
     lines = [f"🔥 LOL {head}", ""]
     for tournament, items in grouped.items():
         lines.append(f"【{tournament}】")
-        lines.extend(f"  {_line(match)}" for match in items)
+        lines.extend(f"  {_line(match, show_id=True)}" for match in items)
         lines.append("")
 
     if len(matches) > len(shown):
@@ -115,8 +128,8 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
     for day in days_seen[:days]:
         items = [m for m in matches if m.start_date == day][:limit]
         count += len(items)
-        lines.append(f"—— {day[5:]} ——")
-        lines.extend(f"  {_line(m)}" for m in items)
+        lines.append(f"—— {day_label(day)} ——")
+        lines.extend(f"  {_line(m, show_id=True)}" for m in items)
         lines.append("")
 
     omitted = [m for m in matches if m.start_date not in keep]
@@ -126,6 +139,65 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
     if source:
         footer += f" · 数据源 {source}"
     lines.append(footer)
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------- 联赛详情
+
+
+def tournament_report(
+    name: str,
+    matches: list[Match],
+    *,
+    source: str = "",
+    limit: int = 40,
+    prefix: str = "/lol",
+) -> str:
+    """联赛详情：阶段 → 日期铺开，每行带比赛 ID，方便直接接「详情」。
+
+    一个联赛动辄上百场，所以 ``limit`` 封顶；超出的部分只在末尾提一句，
+    而不是把整屏刷满。
+    """
+    head = f"🏆 LOL 联赛详情 · {name}" if name else "🏆 LOL 联赛详情"
+    if not matches:
+        return f"{head}\n\n这个联赛还没有排期数据。"
+
+    days = sorted({m.start_date for m in matches if m.start_date})
+    lines = [head]
+    meta = []
+    if len(days) > 1:
+        meta.append(f"{days[0][5:]} ~ {days[-1][5:]}")
+    elif days:
+        meta.append(days[0][5:])
+    meta.append(f"共 {len(matches)} 场")
+    stages = stage_groups(matches)
+    if len(stages) > 1:
+        meta.append("／".join(label for label, _ in stages))
+    lines.append("　".join(meta))
+    lines.append("")
+
+    shown = 0
+    for label, items in stages:
+        block: list[str] = [f"【{label}】"]
+        day = ""
+        for match in items:
+            if shown >= limit:
+                break
+            if match.start_date != day:
+                day = match.start_date
+                block.append(f"  {day_label(day)}")
+            block.append(f"    {_line(match, show_id=True)}")
+            shown += 1
+        lines.extend(block)
+        if shown >= limit:
+            break
+
+    lines.append("")
+    if shown < len(matches):
+        lines.append(f"… 还有 {len(matches) - shown} 场未显示（共 {len(matches)} 场）")
+    lines.append(f"看单场逐局数据：{prefix} 详情 <上面每行末尾的编号>")
+    if source:
+        lines.append(f"数据源 {source}")
     return "\n".join(lines).strip()
 
 
@@ -402,7 +474,7 @@ def help_text(prefix: str = "/lol") -> str:
             f"{prefix} 今日        今天的比赛",
             f"{prefix} 本周        未来 7 天",
             f"{prefix} 联赛        进行中/即将开始的联赛与 ID",
-            f"{prefix} 联赛详情 <ID>   该联赛近期场次",
+            f"{prefix} 联赛详情 <ID>   该联赛全部场次，按阶段分组、每场带比赛 ID",
             f"{prefix} 详情 <比赛ID>   单场逐局数据（BP/推塔/选手经济伤害）",
             f"{prefix} 详情 <比赛ID> <局号>  只看其中一局",
             "",

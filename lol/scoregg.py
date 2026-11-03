@@ -19,14 +19,17 @@
 接口行为备忘（实测 2026-11）
 ---------------------------
 - 不传 ``date``：返回连续 7 天，键形如 ``2026.11.02``，当天无比赛时值是空列表；
-- 传 ``date`` + ``tournament_id``：只返回那一天，且只含该联赛。
+- 传 ``date``：返回 ``[date-3, date+3]`` 这 7 天，**不是**只回那一天；
+  要单日得自己按日期过滤；
+- 传 ``tournament_id``：只含该联赛，但窗口大小同样是 7 天。想看整个联赛
+  必须按起止日期切锚点分次拉（见 :meth:`ScoreggProvider._tournament_schedule`）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -74,6 +77,16 @@ BASE_PARAMS: dict[str, Any] = {
 # 联赛状态：2 = 已结束
 _TOURNAMENT_FINISHED = 2
 
+# 赛程接口一次固定回 7 天窗口，锚点 ``date`` 决定窗口落在哪：``[date-3, date+3]``。
+# 所以「整个联赛」只能按起止日期切锚点分几次拉。
+_WINDOW_DAYS = 7
+# 一个联赛最多拉 8 个窗口（≈ 56 天），再长的赛事也没必要一次铺完
+_MAX_WINDOWS = 8
+# 找联赛起止日期时扫的条目数，覆盖住当前在办和刚办完的几个赛事
+_TOURNAMENT_SCAN = 100
+# 起止日期的记忆条数，防止长期运行越攒越多
+_SPAN_CACHE = 32
+
 
 def _int(value: Any) -> int:
     try:
@@ -86,6 +99,14 @@ def _day_key(text: str) -> str:
     """``2026.11.02`` → ``2026-11-02``。已经是横线格式就原样返回。"""
     raw = str(text or "").strip()
     return raw.replace(".", "-") if raw else ""
+
+
+def _shift(day: str, days: int) -> str:
+    """日期加减，只认 ``YYYY-MM-DD``；解析不了就原样返回，让调用方循环退出。"""
+    try:
+        return (date.fromisoformat(day[:10]) + timedelta(days=days)).isoformat()
+    except ValueError:
+        return day
 
 
 def _num(value: Any) -> int:
@@ -184,6 +205,8 @@ class ScoreggProvider:
         self._book = book  # ChampionBook | None，用来补全缺失的英雄名
         self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
+        # 联赛 ID → (开赛日, 结束日)；空元组表示「查过，没有」
+        self._spans: dict[str, tuple[str, ...]] = {}
 
     # ------------------------------------------------------------------ 底层
 
@@ -292,7 +315,25 @@ class ScoreggProvider:
         return [t for t in await self.tournaments(limit=limit) if t.status != _TOURNAMENT_FINISHED]
 
     async def schedule(self, *, day: str = "", tournament_id: str = "") -> list[Match]:
-        """某一天（或未来一周）的比赛。``day`` 为空时返回 7 天。"""
+        """某一天（或未来一周）的比赛。``day`` 为空时返回 7 天。
+
+        只给 ``tournament_id`` 时另走 :meth:`_tournament_schedule`——联赛详情
+        要的是全程，不是一周。
+        """
+        if tournament_id and not day:
+            return await self._tournament_schedule(tournament_id)
+        return await self._window(day=day, tournament_id=tournament_id)
+
+    async def _window(
+        self, *, day: str = "", tournament_id: str = "", filter_day: bool = True
+    ) -> list[Match]:
+        """打一次接口，拿一个 7 天窗口。
+
+        注意 ``date`` 只是窗口锚点（回 ``[date-3, date+3]`` 整整 7 天），
+        不是「只回这一天」——所以 ``day`` 有两种用法：
+        ``filter_day=True`` 时把结果削到那一天（查「今日」用），
+        ``False`` 时整个 7 天窗口都留下（拼整个联赛的赛程用）。
+        """
         params: dict[str, Any] = {"api_path": "services/match/web_math_list.php"}
         if day:
             params["date"] = day
@@ -307,7 +348,7 @@ class ScoreggProvider:
         out: list[Match] = []
         for raw_day, value in listing.items():
             norm_day = _day_key(raw_day)
-            if day and norm_day != day:
+            if filter_day and day and norm_day != day:
                 continue
             if not isinstance(value, dict):
                 continue
@@ -331,6 +372,79 @@ class ScoreggProvider:
                     out.append(parsed)
         out.sort(key=lambda m: (m.start_date, m.start_time))
         return out
+
+    async def _tournament_schedule(self, tournament_id: str) -> list[Match]:
+        """一个联赛的完整赛程。
+
+        接口一次只回 7 天，所以按联赛起止日期切锚点、并发拉，再按比赛 ID 去重。
+        拿不到起止日期（联赛不在列表首页）就退回默认那一个窗口，至少不空手。
+        """
+        span = await self._tournament_span(tournament_id)
+        if span is None:
+            return await self._window(tournament_id=tournament_id)
+
+        start, end = span
+        anchors: list[str] = []
+        cursor = start
+        while cursor <= end and len(anchors) < _MAX_WINDOWS:
+            anchors.append(cursor)
+            cursor = _shift(cursor, _WINDOW_DAYS)
+        if not anchors:
+            anchors = [start]
+
+        batches = await asyncio.gather(
+            *(
+                self._window(day=anchor, tournament_id=tournament_id, filter_day=False)
+                for anchor in anchors
+            ),
+            return_exceptions=True,
+        )
+        seen: dict[str, Match] = {}
+        for batch in batches:
+            if isinstance(batch, BaseException):
+                continue
+            for match in batch:
+                seen.setdefault(match.id, match)
+        out = list(seen.values())
+        out.sort(key=lambda m: (m.start_date, m.start_time))
+        return out
+
+    async def _tournament_span(self, tournament_id: str) -> tuple[str, str] | None:
+        """联赛的 ``(开赛日, 结束日)``。查过就记一笔，含「查过但没找到」。"""
+        cached = self._spans.get(tournament_id)
+        if cached is not None:
+            return cached or None
+        try:
+            data = await self._post(
+                {
+                    "api_path": "services/match/web_tournament_group_list.php",
+                    "method": "GET",
+                    "language_id": 1,
+                    "type": "all",
+                    "page": 1,
+                    "limit": _TOURNAMENT_SCAN,
+                }
+            )
+        except ProviderError:
+            return None
+        for item in data.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("tournamentID") or "") != tournament_id:
+                continue
+            start = str(item.get("start_date") or "")
+            end = str(item.get("end_date") or "")
+            if start and end:
+                self._remember_span(tournament_id, start, end)
+                return (start, end)
+            break
+        self._remember_span(tournament_id, "", "")
+        return None
+
+    def _remember_span(self, tournament_id: str, start: str, end: str) -> None:
+        if len(self._spans) >= _SPAN_CACHE:
+            self._spans.pop(next(iter(self._spans)))
+        self._spans[tournament_id] = (start, end) if start and end else ()
 
     async def week(self) -> list[Match]:
         return await self.schedule()
