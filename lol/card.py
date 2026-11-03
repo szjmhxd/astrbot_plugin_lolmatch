@@ -45,6 +45,7 @@ MUTED = "#8b949e"
 DIM = "#5b6572"
 BLUE = "#58a6ff"
 RED = "#f85149"
+RED_BG = "#3a1a1c"
 WIN = "#e3b341"
 GREEN = "#3fb950"
 
@@ -780,11 +781,25 @@ def _player_table(
         for index, item_url in enumerate(player.items):
             canvas.icon(item_x + index * 22, sub_y, 20, icons.get(item_url), radius=3)
         if player.beiguo:
-            canvas.text_right(WIDTH - PAD - 10, sub_y + 3, "背锅", 10, fill=RED)
+            _honor_chip(canvas, y)
         y += _player_rows(fonts)
 
     canvas.line(PAD, y, WIDTH - PAD, y, fill=LINE)
     return y
+
+
+def _honor_chip(canvas: Canvas, y: float) -> None:
+    """「背锅」做成贴在该选手名字行右侧的小标签。
+
+    之前贴在第二行右端，离选手名隔着一整行，看着像漂在卡片边缘的孤立文字；
+    挪到名字这一行才能明确它属于谁。
+    """
+    label = "背锅"
+    font_size = 10
+    width = canvas.measure(label, font_size) + 14
+    x = WIDTH - PAD - width
+    canvas.rrect(x, y + 1, width, 17, radius=8, fill=RED_BG)
+    canvas.text(x + width / 2, y + 3, label, font_size, fill=RED, anchor="mt")
 
 
 # ---------------------------------------------------------------- 门面
