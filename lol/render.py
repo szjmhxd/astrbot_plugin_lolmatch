@@ -16,6 +16,8 @@ from .models import (
     MatchDetail,
     PlayerStat,
     Tournament,
+    bracket_columns,
+    bracket_rounds,
     day_label,
     stage_groups,
     status_icon,
@@ -60,9 +62,9 @@ def _line(
         # 只有跨天的列表才需要日期，否则每一行都在重复标题里的那天
         clock = f"{match.start_date[5:]} {clock}"
     if match.started:
-        score = f"{match.team_a} {match.score_line} {match.team_b}"
+        score = f"{match.name_a} {match.score_line} {match.name_b}"
     else:
-        score = f"{match.team_a} vs {match.team_b}"
+        score = f"{match.name_a} vs {match.name_b}"
     extra = f"BO{match.best_of}" if match.best_of else ""
     if match.finished and match.winner:
         extra = f"{extra} · {match.winner} 胜".strip(" ·")
@@ -145,6 +147,30 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
 # ---------------------------------------------------------------------- 联赛详情
 
 
+def bracket_lines(matches: list[Match]) -> list[str]:
+    """晋级图的纯文字版：每个能成树的赛段，一列一行。
+
+    图形版是主菜，但这几行要能独立看懂——没装字体、或者客户端吞图的时候，
+    它是唯一的替代。
+    """
+    lines: list[str] = []
+    for stage, items in stage_groups(matches):
+        columns = bracket_columns(items)
+        if not columns:
+            continue
+        lines.append(f"【晋级 · {stage}】")
+        for label, column in zip(bracket_rounds(columns), columns, strict=True):
+            parts = []
+            for match in column:
+                head = f"{match.start_date[5:]} " if match.start_date else ""
+                if match.started:
+                    parts.append(f"{head}{match.name_a} {match.score_line} {match.name_b}".strip())
+                else:
+                    parts.append(f"{head}{match.name_a} vs {match.name_b}".strip())
+            lines.append(f"  {label}　" + "｜".join(parts))
+    return lines
+
+
 def tournament_report(
     name: str,
     matches: list[Match],
@@ -156,12 +182,14 @@ def tournament_report(
     """联赛详情：阶段 → 日期铺开，每行带比赛 ID，方便直接接「详情」。
 
     一个联赛动辄上百场，所以 ``limit`` 封顶；超出的部分只在末尾提一句，
-    而不是把整屏刷满。
+    而不是把整屏刷满。``limit <= 0`` 表示不封顶——调用方要全量时用它，
+    否则会被误当成「一场都不给」。
     """
     head = f"🏆 LOL 联赛详情 · {name}" if name else "🏆 LOL 联赛详情"
     if not matches:
         return f"{head}\n\n这个联赛还没有排期数据。"
 
+    limit = limit if limit > 0 else len(matches)
     days = sorted({m.start_date for m in matches if m.start_date})
     lines = [head]
     meta = []
@@ -195,6 +223,10 @@ def tournament_report(
     lines.append("")
     if shown < len(matches):
         lines.append(f"… 还有 {len(matches) - shown} 场未显示（共 {len(matches)} 场）")
+    bracket = bracket_lines(matches)
+    if bracket:
+        lines.extend(bracket)
+        lines.append("")
     lines.append(f"看单场逐局数据：{prefix} 详情 <上面每行末尾的编号>")
     if source:
         lines.append(f"数据源 {source}")

@@ -47,6 +47,7 @@ from .models import (
     ProviderError,
     TeamFight,
     Tournament,
+    is_tbd,
 )
 from .spells import spell_pairs as spell_pairs_of
 
@@ -271,6 +272,11 @@ class ScoreggProvider:
     @staticmethod
     def _parse_match(raw: dict[str, Any], tournament: dict[str, Any] | None, day: str) -> Match:
         info = tournament or {}
+        team_a = str(raw.get("team_a_short_name") or "")
+        team_b = str(raw.get("team_b_short_name") or "")
+        # 对阵未定的场次，源站会给双方都塞同一张「默认队标」（白圆图）。
+        # 那不是队标，画出来只会是两个白点，所以直接置空走占位块。
+        blank_a, blank_b = is_tbd(team_a), is_tbd(team_b)
         return Match(
             id=str(raw.get("match_id") or ""),
             tournament_id=str(raw.get("tournamentID") or info.get("tournamentID") or ""),
@@ -278,8 +284,8 @@ class ScoreggProvider:
                 raw.get("tournament_name") or info.get("short_name") or info.get("name") or ""
             ),
             round_name=str(raw.get("round_name") or ""),
-            team_a=str(raw.get("team_a_short_name") or ""),
-            team_b=str(raw.get("team_b_short_name") or ""),
+            team_a=team_a,
+            team_b=team_b,
             score_a=_int(raw.get("team_a_win")),
             score_b=_int(raw.get("team_b_win")),
             best_of=_int(raw.get("game_count")),
@@ -287,8 +293,8 @@ class ScoreggProvider:
             start_time=str(raw.get("start_time") or ""),
             status=_int(raw.get("status")),
             winner=str(raw.get("win_team_short_name") or ""),
-            flag_a=str(raw.get("team_a_image") or ""),
-            flag_b=str(raw.get("team_b_image") or ""),
+            flag_a="" if blank_a else str(raw.get("team_a_image") or ""),
+            flag_b="" if blank_b else str(raw.get("team_b_image") or ""),
         )
 
     # ------------------------------------------------------------------ 对外
@@ -366,9 +372,9 @@ class ScoreggProvider:
                     if not isinstance(item, dict):
                         continue
                     parsed = self._parse_match(item, info, norm_day)
-                    # 赛程里偶尔会有「对阵未定」的空壳条目（两个队名都空），直接丢掉
-                    if not (parsed.team_a or parsed.team_b):
-                        continue
+                    # 「对阵未定」的占位场次以前直接丢掉，但淘汰赛后几轮只有占位
+                    # （官方页面上的 11-08 半决赛、11-15 决赛都是这种），
+                    # 丢了就画不出晋级图，赛程上也会凭空少两天。留着，渲染成「待定」。
                     out.append(parsed)
         out.sort(key=lambda m: (m.start_date, m.start_time))
         return out

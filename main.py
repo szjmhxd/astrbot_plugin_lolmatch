@@ -34,7 +34,13 @@ from astrbot.api.star import Context, Star, StarTools
 from .lol import render
 from .lol.card import CardRenderer
 from .lol.champions import ChampionBook
-from .lol.models import ProviderError, day_label, paginate_by_day, stage_groups
+from .lol.models import (
+    ProviderError,
+    bracket_columns,
+    day_label,
+    paginate_by_day,
+    stage_groups,
+)
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
 from .lol.store import SessionStore
@@ -530,6 +536,19 @@ class LolMatchPlugin(Star):
                 limit=0,
                 source=source,
                 total=len(matches),
+            )
+            if png:
+                out.append(png)
+        # 再补每个赛段的晋级图：赛程列表看得出「哪天打谁」，看不出「谁把谁淘汰了」
+        for stage, items in stage_groups(matches):
+            columns = bracket_columns(items)
+            if not columns:
+                continue
+            png = await self._cards.bracket(
+                title=f"晋级图 · {stage}",
+                columns=columns,
+                subtitle=f"{name}　{len(items)} 场",
+                source=source,
             )
             if png:
                 out.append(png)

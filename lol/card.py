@@ -22,7 +22,18 @@ import io
 from pathlib import Path
 from typing import Any
 
-from .models import Game, Match, MatchDetail, PlayerStat, day_label, stage_groups
+from .models import (
+    Game,
+    Match,
+    MatchDetail,
+    PlayerStat,
+    bracket_edges,
+    bracket_parents,
+    bracket_rounds,
+    bracket_strict,
+    day_label,
+    stage_groups,
+)
 
 try:
     from PIL import Image, ImageChops, ImageDraw, ImageFont
@@ -367,20 +378,23 @@ def _schedule_row(
     tag = f"BO{match.best_of}" if match.best_of else ""
     if tag:
         canvas.text(PAD + 66, y + 15, tag, 10, fill=DIM)
+    # 对阵未定的场次（淘汰赛后几轮）压暗：日期是真的，队伍还没定
+    name_fill = MUTED if match.pending else INK
     canvas.icon(
         PAD + 96,
         y + 10 if show_id else y + 8,
         26,
-        icons.get(match.flag_a),
-        placeholder=match.team_a[:2],
+        None if match.pending else icons.get(match.flag_a),
+        placeholder="" if match.pending else match.name_a[:2],
         size_hint=9,
         bg=PANEL_2,
     )
     canvas.text(
         PAD + 130,
         y + 14 if show_id else y + 12,
-        canvas.fit(match.team_a or "?", 15, 200),
+        canvas.fit(match.name_a, 15, 200),
         15,
+        fill=name_fill,
     )
     middle = match.score_line if match.started else "vs"
     canvas.text(
@@ -395,15 +409,16 @@ def _schedule_row(
     canvas.text_right(
         WIDTH - PAD - 48,
         y + 14 if show_id else y + 12,
-        canvas.fit(match.team_b or "?", 15, 200),
+        canvas.fit(match.name_b, 15, 200),
         15,
+        fill=name_fill,
     )
     canvas.icon(
         WIDTH - PAD - 40,
         y + 10 if show_id else y + 8,
         26,
-        icons.get(match.flag_b),
-        placeholder=match.team_b[:2],
+        None if match.pending else icons.get(match.flag_b),
+        placeholder="" if match.pending else match.name_b[:2],
         size_hint=9,
         bg=PANEL_2,
     )
@@ -463,6 +478,143 @@ def schedule_card(
 
     if source:
         canvas.text(PAD, height - PAD - 14, f"数据源 {source}", 11, fill=DIM)
+    return canvas.to_bytes()
+
+
+# ---------------------------------------------------------------- 晋级图
+
+BRACKET_BOX_H = 62
+BRACKET_GAP = 46  # 列间水平空隙，连线画在这里
+BRACKET_VGAP = 22  # 同列上下两场的距离（要放得下下一场的日期行）
+BRACKET_HEAD = 15  # 每场上面那行日期
+
+
+def _bracket_box(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    match: Match,
+    x: float,
+    y: float,
+    w: float,
+) -> None:
+    """一场比赛画成一个双行小块：上队一行、下队一行，胜方金色。"""
+    canvas.text(x, y - BRACKET_HEAD + 1, match.clock, 10, fill=DIM)
+    if match.best_of:
+        canvas.text_right(x + w, y - BRACKET_HEAD + 1, f"BO{match.best_of}", 10, fill=DIM)
+
+    top = y
+    canvas.rrect(x, top, w, BRACKET_BOX_H, radius=6, fill=PANEL)
+
+    for index, (name, flag, score, won) in enumerate(
+        (
+            (match.name_a, match.flag_a, match.score_a, match.score_a > match.score_b),
+            (match.name_b, match.flag_b, match.score_b, match.score_b > match.score_a),
+        )
+    ):
+        row = index * (BRACKET_BOX_H // 2) + 4
+        # 只有「已开打并且赢了」才镀金；未开打和对阵未定都用中性灰
+        decided = match.started
+        fill = WIN if decided and won else MUTED
+        canvas.icon(
+            x + 6,
+            top + row,
+            20,
+            None if match.pending else icons.get(flag),
+            placeholder="" if match.pending else name[:2],
+            size_hint=8,
+            bg=PANEL_2,
+        )
+        canvas.text(
+            x + 32,
+            top + row + 3,
+            canvas.fit(name, 13, w - 74, bold=won),
+            13,
+            fill=fill,
+            bold=won and decided,
+        )
+        canvas.text_right(
+            x + w - 8,
+            top + row + 3,
+            str(score) if decided else "–",
+            13,
+            fill=fill,
+            bold=won and decided,
+        )
+        if index == 0:
+            canvas.line(x + 6, top + BRACKET_BOX_H // 2, x + w - 6, top + BRACKET_BOX_H // 2)
+
+
+def bracket_card(
+    fonts: Fonts,
+    icons: dict[str, bytes],
+    *,
+    title: str,
+    columns: list[list[Match]],
+    subtitle: str = "",
+    source: str = "",
+) -> bytes | None:
+    """赛段晋级图：横向多列，列间画直角连线，胜方高亮，未定的写「待定」。
+
+    列宽随列数自适应，但封顶 320——两列的赛段别拉成一整条长砖。
+    """
+    if not fonts.available or not columns:
+        return None
+
+    cols = [col for col in columns if col]
+    if not cols:
+        return None
+
+    inner = WIDTH - PAD * 2
+    box_w = min(320.0, (inner - BRACKET_GAP * (len(cols) - 1)) / len(cols))
+    used = box_w * len(cols) + BRACKET_GAP * (len(cols) - 1)
+    x0 = (WIDTH - used) / 2
+
+    # 先算纵向坐标：首列等距铺开，其余列对准它父级的中心
+    ys: list[list[float]] = []
+    top = PAD + 74
+    ys.append([top + i * (BRACKET_BOX_H + BRACKET_VGAP) for i in range(len(cols[0]))])
+    for index in range(1, len(cols)):
+        prev = ys[index - 1]
+        column: list[float] = []
+        for j in range(len(cols[index])):
+            parents = bracket_parents(len(prev), j)
+            if parents:
+                center = sum(prev[p] + BRACKET_BOX_H / 2 for p in parents) / len(parents)
+                column.append(center - BRACKET_BOX_H / 2)
+            else:  # 理论上不会发生；保底按首列间距铺，别叠在一起
+                column.append(top + j * (BRACKET_BOX_H + BRACKET_VGAP))
+        ys.append(column)
+
+    height = max(max(c) for c in ys) + BRACKET_BOX_H + 30 + PAD
+    canvas = Canvas(fonts, WIDTH, height)
+    rounds = bracket_rounds(cols)
+    edges = bracket_edges(cols, strict=bracket_strict(cols))
+
+    canvas.text(PAD, PAD, title, 22, bold=True)
+    if subtitle:
+        canvas.text_right(WIDTH - PAD, PAD + 6, subtitle, 12, fill=MUTED)
+
+    # 先画连线再画块，线头被块盖住，不会露出来
+    for (pc, pr), (cc, cr) in edges:
+        if cc != pc + 1:
+            continue
+        left = x0 + pc * (box_w + BRACKET_GAP) + box_w
+        right = x0 + cc * (box_w + BRACKET_GAP)
+        mid = (left + right) / 2
+        py = ys[pc][pr] + BRACKET_BOX_H / 2
+        cy = ys[cc][cr] + BRACKET_BOX_H / 2
+        canvas.line(left + 3, py, mid, py, fill=LINE)
+        canvas.line(mid, py, mid, cy, fill=LINE)
+        canvas.line(mid, cy, right - 3, cy, fill=LINE)
+
+    for index, col in enumerate(cols):
+        x = x0 + index * (box_w + BRACKET_GAP)
+        canvas.text(x + 2, top - 40, rounds[index], 11, fill=WIN, bold=True)
+        for j, match in enumerate(col):
+            _bracket_box(canvas, icons, match, x, ys[index][j], box_w)
+
+    if source:
+        canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
     return canvas.to_bytes()
 
 
@@ -969,6 +1121,9 @@ def game_card(
         y += 4
 
     # 双方五人
+    everyone = [p for _, squad, _ in squads for p in squad]
+    peak_damage = max((p.damage_pct for p in everyone), default=0.0)
+    peak_taken = max((p.damage_taken for p in everyone), default=0)
     for label, squad, side in squads:
         if not squad:
             continue
@@ -978,6 +1133,19 @@ def game_card(
         flag = game.flag_a if side == "a" else game.flag_b
         canvas.icon(PAD + 8, y + 3, 20, icons.get(flag or ""), radius=4)
         canvas.text(PAD + 36, y + 4, label or "?", 14, bold=True, fill=BLUE if side == "a" else RED)
+        if game.win_side:
+            # 胜负贴着队名，别丢到右边数字堆里——一眼要先知道这行是哪边的
+            won = side == game.win_side
+            chip_x = PAD + 44 + canvas.measure(label or "?", 14, bold=True)
+            canvas.rrect(chip_x, y + 6, 22, 15, radius=7, fill=WIN if won else PANEL)
+            canvas.text(
+                chip_x + 11,
+                y + 7,
+                "胜" if won else "负",
+                10,
+                fill=BG if won else DIM,
+                anchor="mt",
+            )
         canvas.text_right(
             WIDTH - PAD - 12,
             y + 6,
@@ -987,7 +1155,15 @@ def game_card(
             fill=MUTED,
         )
         y += TEAM_HEAD
-        y = _player_table(canvas, fonts, icons, squad, y)
+        y = _player_table(
+            canvas,
+            fonts,
+            icons,
+            squad,
+            y,
+            peak_damage=peak_damage,
+            peak_taken=peak_taken,
+        )
         y += 12
 
     if source:
@@ -1008,8 +1184,26 @@ def _has_first(game: Game) -> bool:
     )
 
 
+def _bar(canvas: Canvas, x: float, y: float, w: float, ratio: float, color: str) -> None:
+    """一根细比例条：底轨常驻，填充按 ``ratio``（0~1）。
+
+    只给「伤害%」「承伤%」两列配条，别的列不配——一条 3px 的条在 880 宽的卡上
+    只够表达一个量级，列多了就变成一排噪声，反而看不出谁是核心。
+    """
+    canvas.rrect(x, y, w, 3, radius=1.5, fill=PANEL_2)
+    if ratio > 0:
+        canvas.rrect(x, y, max(1.5, w * min(1.0, ratio)), 3, radius=1.5, fill=color)
+
+
 def _player_table(
-    canvas: Canvas, fonts: Fonts, icons: dict[str, bytes], squad: list[PlayerStat], y: float
+    canvas: Canvas,
+    fonts: Fonts,
+    icons: dict[str, bytes],
+    squad: list[PlayerStat],
+    y: float,
+    *,
+    peak_damage: float = 0.0,
+    peak_taken: float = 0.0,
 ) -> float:
     """一名选手两行：数据行 + 技能/符文/出装行。返回结束时的 y。"""
     # 列位置（逻辑像素，全部相对 PAD）
@@ -1062,8 +1256,14 @@ def _player_table(
             12,
             fill=MUTED,
         )
+        if peak_damage > 0:
+            _bar(canvas, col_dmg, y + 20, 52, player.damage_pct / peak_damage, WIN)
         canvas.text(col_part, y + 4, f"{player.part:.0f}%" if player.part else "—", 12, fill=MUTED)
         canvas.text(col_taken, y + 4, _gold(player.damage_taken), 12, fill=MUTED)
+        # 承伤条按**绝对值**归一，不按 damage_taken_pct：那一列显示的是 23.8k 这种
+        # 绝对值，底下却按占比画条，两套口径会让读者对不上号。
+        if peak_taken > 0:
+            _bar(canvas, col_taken, y + 20, 48, player.damage_taken / peak_taken, GREEN)
         canvas.text(
             col_score, y + 4, f"{player.score:.1f}" if player.score else "—", 12, fill=MUTED
         )
@@ -1180,6 +1380,33 @@ class CardRenderer:
                 show_id=True,
                 group="stage",
                 total=total,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            return None
+
+    async def bracket(
+        self,
+        *,
+        title: str,
+        columns: list[list[Match]],
+        subtitle: str = "",
+        source: str = "",
+    ) -> bytes | None:
+        """赛段晋级图。"""
+        if not self.available:
+            self._fail()
+            return None
+        try:
+            flat = [match for col in columns for match in col]
+            icons = await self.store.warm(_collect_urls(flat, []))
+            return bracket_card(
+                self.fonts,
+                icons,
+                title=title,
+                columns=columns,
+                subtitle=subtitle,
+                source=source,
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)
