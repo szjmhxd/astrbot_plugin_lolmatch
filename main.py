@@ -34,7 +34,7 @@ from astrbot.api.star import Context, Star, StarTools
 from .lol import render
 from .lol.card import CardRenderer
 from .lol.champions import ChampionBook
-from .lol.models import ProviderError, day_label, stage_groups
+from .lol.models import ProviderError, day_label, paginate_by_day, stage_groups
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
 from .lol.store import SessionStore
@@ -486,10 +486,15 @@ class LolMatchPlugin(Star):
         if not matches:
             return f"🏆 {name}\n\n这个联赛还没有排期数据。　数据源 {label}"
 
-        text = render.tournament_report(name, matches, source=label)
+        # 纯文字兜底也要全给：40 场封顶会同样吞掉末尾几天，和图一个毛病
+        text = render.tournament_report(name, matches, source=label, limit=0)
         images = await self._tournament_cards(name, matches, label)
         if images:
-            return self._tournament_brief(name, matches, label), images
+            brief = self._tournament_brief(name, matches, label)
+            if len(images) > 1:
+                # 多张图在多数客户端展开成一排缩略图，先说一句省得读者以为只有一张
+                brief += f"　分 {len(images)} 张"
+            return brief, images
         return text
 
     def _tournament_brief(self, name: str, matches, source: str) -> str:
@@ -506,21 +511,29 @@ class LolMatchPlugin(Star):
         return f"{brief}　数据源 {source}"
 
     async def _tournament_cards(self, name: str, matches, source: str) -> list[bytes]:
+        """联赛详情图。超过一页就按日期边界续页，绝不静默截断。"""
         if self._cards is None or not self._cards.available:
             return []
         limit = self._cfg_int("tournament_card_limit", 36)
         days = sorted({m.start_date for m in matches if m.start_date})
-        subtitle = f"{days[0][5:]} ~ {days[-1][5:]}" if len(days) > 1 else ""
-        if len(matches) > limit:
-            subtitle = f"{subtitle}　只列前 {limit} 场".strip()
-        png = await self._cards.tournament(
-            title=f"LOL 联赛详情 · {name}",
-            matches=matches,
-            subtitle=subtitle,
-            limit=limit,
-            source=source,
-        )
-        return [png] if png else []
+        span = f"{days[0][5:]} ~ {days[-1][5:]}" if len(days) > 1 else ""
+        pages = paginate_by_day(matches, limit)
+        out: list[bytes] = []
+        for index, page in enumerate(pages, 1):
+            title = f"LOL 联赛详情 · {name}"
+            if len(pages) > 1:
+                title += f"（{index}/{len(pages)}）"
+            png = await self._cards.tournament(
+                title=title,
+                matches=page,
+                subtitle=span,
+                limit=0,
+                source=source,
+                total=len(matches),
+            )
+            if png:
+                out.append(png)
+        return out
 
     # ------------------------------------------------------------------ 订阅
 

@@ -46,6 +46,34 @@ def stage_groups(matches: list[Match]) -> list[tuple[str, list[Match]]]:
     return list(groups.items())
 
 
+def paginate_by_day(matches: list[Match], limit: int) -> list[list[Match]]:
+    """按**日期边界**切页，每页不超过 ``limit`` 场。
+
+    联赛详情卡之前直接 ``matches[:limit]``，等于从中间一刀切——S16 有 44 场，
+    前 36 场刚好切到 10-31，于是 11-01 那三场和整段淘汰赛凭空消失。
+    数据没丢，是卡片吞了，而图上又没有任何「后面还有」的提示，读者只会以为没比赛。
+
+    现在按天打包：一天之内不劈开，宁可让单天超限自成一页也不拆。
+    """
+    if limit <= 0 or len(matches) <= limit:
+        return [matches] if matches else []
+
+    days: dict[str, list[Match]] = {}
+    for match in matches:
+        days.setdefault(match.start_date, []).append(match)
+
+    pages: list[list[Match]] = []
+    page: list[Match] = []
+    for items in days.values():
+        if page and len(page) + len(items) > limit:
+            pages.append(page)
+            page = []
+        page.extend(items)
+    if page:
+        pages.append(page)
+    return pages
+
+
 def status_text(status: int) -> str:
     if 0 <= status < len(STATUS_TEXT):
         return STATUS_TEXT[status]

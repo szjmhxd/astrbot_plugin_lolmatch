@@ -420,8 +420,13 @@ def schedule_card(
     subtitle: str = "",
     show_id: bool = False,
     group: str = "tournament",
+    total: int = 0,
 ) -> bytes | None:
-    """今日 / 本周 / 联赛详情共用一张卡，只是分组方式和副标题不同。"""
+    """今日 / 本周 / 联赛详情共用一张卡，只是分组方式和副标题不同。
+
+    ``total`` 只影响右上角那行字：联赛详情会分页，每页只拿到自己那一段，
+    但读者关心的是「这个联赛一共多少场」，不是「这一页几张」。
+    """
     if not fonts.available:
         return None
     blocks = _schedule_blocks(matches, limit, group=group)
@@ -434,7 +439,7 @@ def schedule_card(
     canvas = Canvas(fonts, WIDTH, height)
 
     canvas.text(PAD, PAD, title, 24, bold=True)
-    canvas.text_right(WIDTH - PAD, PAD + 8, f"共 {len(matches)} 场", 13, fill=MUTED)
+    canvas.text_right(WIDTH - PAD, PAD + 8, f"共 {total or len(matches)} 场", 13, fill=MUTED)
 
     y = PAD + 44
     if subtitle:
@@ -1156,6 +1161,7 @@ class CardRenderer:
         subtitle: str = "",
         limit: int = 40,
         source: str = "",
+        total: int = 0,
     ) -> bytes | None:
         """联赛详情卡：阶段 → 日期，每场带比赛 ID。"""
         if not self.available:
@@ -1173,6 +1179,7 @@ class CardRenderer:
                 subtitle=subtitle,
                 show_id=True,
                 group="stage",
+                total=total,
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)
