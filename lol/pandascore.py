@@ -156,17 +156,18 @@ class PandaScoreProvider:
             if isinstance(r, dict)
         }
 
-        def _team(index: int) -> tuple[str, str]:
+        def _team(index: int) -> tuple[str, str, str]:
             if index < len(opponents) and isinstance(opponents[index], dict):
                 team = opponents[index].get("opponent") or {}
                 return (
                     str(team.get("acronym") or team.get("name") or ""),
                     str(team.get("id") or ""),
+                    str(team.get("image_url") or ""),
                 )
-            return "", ""
+            return "", "", ""
 
-        name_a, id_a = _team(0)
-        name_b, id_b = _team(1)
+        name_a, id_a, flag_a = _team(0)
+        name_b, id_b, flag_b = _team(1)
         when = _local(raw.get("scheduled_at") or raw.get("begin_at"))
         winner_id = str(raw.get("winner_id") or "")
         winner = ""
@@ -189,6 +190,8 @@ class PandaScoreProvider:
             start_time=when.strftime("%H:%M") if when else "",
             status=_STATUS_MAP.get(str(raw.get("status") or ""), 0),
             winner=winner,
+            flag_a=flag_a,
+            flag_b=flag_b,
         )
 
     # ------------------------------------------------------------------ 对外

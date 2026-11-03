@@ -18,6 +18,10 @@ QQ（aiocqhttp）里非管理员发 @全体 会被服务端拒掉，KOOK 里则�
 
 from __future__ import annotations
 
+import contextlib
+import tempfile
+import uuid
+from pathlib import Path
 from typing import Any
 
 from ._log import logger
@@ -36,6 +40,11 @@ try:
     from astrbot.api.message_components import AtAll
 except ImportError:  # pragma: no cover
     AtAll = None  # type: ignore[assignment]
+
+try:
+    from astrbot.api.message_components import Image
+except ImportError:  # pragma: no cover
+    Image = None  # type: ignore[assignment]
 
 try:
     from astrbot.api.message_components import Plain
@@ -68,7 +77,13 @@ class Notifier:
 
     # ------------------------------------------------------------------ 构造
 
-    def _chain(self, text: str, mode: str, targets: list[str]) -> Any:
+    def _chain(
+        self,
+        text: str,
+        mode: str,
+        targets: list[str],
+        images: list[Any] | None = None,
+    ) -> Any:
         if MessageChain is None or Plain is None:
             return None
         parts: list[Any] = []
@@ -90,13 +105,41 @@ class Notifier:
             if len(parts) > 0:
                 parts.append(Plain("\n"))
 
-        parts.append(Plain(text))
+        # 图放前面：群里先看到比分板，再读文字，比反过来顺手
+        for image in images or []:
+            parts.append(image)
+        if text:
+            parts.append(Plain(text))
 
         try:
             return MessageChain(parts)
         except Exception as exc:  # noqa: BLE001  # pragma: no cover
             logger.debug(f"[LOL赛事] 构造消息链失败：{exc}")
             return None
+
+    def _image_components(self, pngs: list[bytes]) -> tuple[list[Any], list[Path]]:
+        """把 PNG 字节变成消息组件，返回组件和需要事后清理的临时文件。"""
+        if Image is None:
+            return [], []
+        components: list[Any] = []
+        files: list[Path] = []
+        for png in pngs:
+            target = Path(tempfile.gettempdir()) / f"lolmatch_{uuid.uuid4().hex}.png"
+            try:
+                target.write_bytes(png)
+            except OSError as exc:
+                logger.debug(f"[LOL赛事] 卡片临时文件写入失败：{exc}")
+                continue
+            files.append(target)
+            try:
+                # 优先走文件：各适配器对文件路径的支持最一致
+                components.append(Image.fromFileSystem(str(target)))
+            except Exception:  # noqa: BLE001 老版本没有这个类方法，退回 base64
+                try:
+                    components.append(Image.fromBytes(png))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[LOL赛事] 构造图片消息失败：{exc}")
+        return components, files
 
     # ------------------------------------------------------------------ 发送
 
@@ -107,33 +150,45 @@ class Notifier:
         *,
         mode: str = "none",
         targets: list[str] | None = None,
+        images: list[bytes] | None = None,
     ) -> bool:
-        """发一条消息。带 @ 失败会自动退成纯文本重发一次。"""
+        """发一条消息，可选带图。失败时逐级降级：带图带 @ → 只带 @ → 纯文本。"""
         sender = getattr(self._context, "send_message", None)
         if not callable(sender):
             logger.warning("[LOL赛事] 当前 AstrBot 版本不支持主动发送，跳过本次推送")
             return False
 
         targets = targets or []
-        chain = self._chain(text, mode, targets)
+        components, files = self._image_components(images or [])
 
-        if chain is not None:
-            try:
-                await sender(umo, chain)
-                return True
-            except Exception as exc:  # noqa: BLE001 各平台异常类型不统一，只能兜住
-                normalized = normalize_mention(mode)
-                if normalized != "none":
-                    logger.warning(
-                        f"[LOL赛事] 带 @ 发送失败（多半是机器人没有群管理权限），"
-                        f"降级为普通消息：{type(exc).__name__}: {exc}"
-                    )
-                else:
-                    logger.debug(f"[LOL赛事] 消息链发送失败，回退纯文本：{exc}")
+        attempts: list[Any] = []
+        if components:
+            attempts.append(self._chain(text, mode, targets, components))
+        attempts.append(self._chain(text, mode, targets))
+        attempts.append(text)
 
         try:
-            await sender(umo, text)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[LOL赛事] 推送到 {umo} 失败：{type(exc).__name__}: {exc}")
+            for index, payload in enumerate(attempts):
+                if payload is None:
+                    continue
+                try:
+                    await sender(umo, payload)
+                    return True
+                except Exception as exc:  # noqa: BLE001 各平台异常类型不统一，只能兜住
+                    if index == 0 and components:
+                        logger.warning(
+                            f"[LOL赛事] 带卡片发送失败，改为纯文字：{type(exc).__name__}: {exc}"
+                        )
+                    elif payload is not attempts[-1]:
+                        logger.warning(
+                            f"[LOL赛事] 带 @ 发送失败（多半是机器人没有群管理权限），"
+                            f"降级为普通消息：{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        logger.warning(f"[LOL赛事] 推送到 {umo} 失败：{type(exc).__name__}: {exc}")
             return False
+        finally:
+            # 图发完就没用了；删不掉也不影响功能，只是临时目录多几个文件
+            for path in files:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)

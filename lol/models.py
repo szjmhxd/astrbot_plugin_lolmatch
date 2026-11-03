@@ -68,6 +68,8 @@ class Match:
     start_time: str = ""  # HH:MM
     status: int = 0
     winner: str = ""  # 胜方队名，未结束为空
+    flag_a: str = ""  # 队标地址，卡片用；拿不到就画文字块
+    flag_b: str = ""
 
     @property
     def day(self) -> str:
@@ -93,6 +95,41 @@ class Match:
 
 
 @dataclass(slots=True)
+class PerkSet:
+    """一名选手的符文页。源站按「主系 + 4 枚 + 副系 + 2 枚」给。"""
+
+    primary: str = ""  # 精密
+    keystone: str = ""  # 征服者
+    primary_slots: list[str] = field(default_factory=list)  # 凯旋 / 传说：欢欣 / 砍倒
+    sub: str = ""  # 启迪
+    sub_slots: list[str] = field(default_factory=list)  # 星界洞悉 / 神奇之鞋
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.keystone or self.primary)
+
+    @property
+    def short(self) -> str:
+        """``精密·征服者 / 启迪·星界洞悉`` 这种紧凑写法，卡片和文字都用它。"""
+        head = "·".join(part for part in (self.primary, self.keystone) if part)
+        tail = self.sub
+        if self.sub_slots:
+            tail = f"{tail}·{self.sub_slots[0]}" if tail else self.sub_slots[0]
+        return " / ".join(part for part in (head, tail) if part)
+
+    @property
+    def full(self) -> str:
+        """带齐副系小符文的完整写法，给「详情」这种有版面的时候用。"""
+        head = "·".join(part for part in (self.primary, self.keystone) if part)
+        if self.primary_slots:
+            head += f"（{'/'.join(self.primary_slots)}）"
+        tail = self.sub
+        if self.sub_slots:
+            tail += f"（{'/'.join(self.sub_slots)}）"
+        return " ｜ ".join(part for part in (head, tail) if part)
+
+
+@dataclass(slots=True)
 class PlayerStat:
     nickname: str = ""
     champion: str = ""
@@ -109,10 +146,28 @@ class PlayerStat:
     part: float = 0.0  # 参团率（0~100）
     score: float = 0.0  # 数据源给的评分
     beiguo: bool = False  # 全场最差，源站叫「背锅」
+    # 逐局明细里的更多维度
+    hero_level: int = 0  # 英雄等级
+    damage_taken: int = 0  # 承受伤害
+    damage_taken_pct: float = 0.0
+    gold_per_min: float = 0.0
+    damage_per_min: float = 0.0
+    items: list[str] = field(default_factory=list)  # 出装图标地址（源站只给图，没有道具名）
+    spells: list[str] = field(default_factory=list)  # 召唤师技能中文名，闪现排在最前
+    spell_icons: list[str] = field(default_factory=list)  # 与 spells 同序的图标地址
+    hero_icon: str = ""  # 英雄头像地址，卡片用
+    perks: PerkSet | None = None
+    honor: str = ""  # 荣誉标记，源站给的是「3,5」这种编号
+    player_id: str = ""
 
     @property
     def kda(self) -> str:
         return f"{self.kills}/{self.deaths}/{self.assists}"
+
+    @property
+    def kda_ratio(self) -> float:
+        """KDA 比值，死亡 0 时按 1 算，避免除零。"""
+        return (self.kills + self.assists) / max(1, self.deaths)
 
 
 @dataclass(slots=True)
@@ -147,6 +202,14 @@ class Game:
     damage_b: int = 0
     bans_a: list[str] = field(default_factory=list)
     bans_b: list[str] = field(default_factory=list)
+    # 一血 / 一塔 / 一龙 / 首条大龙 / 首个先锋，值为 "a" / "b" / ""
+    first_blood: str = ""
+    first_tower: str = ""
+    first_dragon: str = ""
+    first_baron: str = ""
+    first_herald: str = ""
+    flag_a: str = ""
+    flag_b: str = ""
     detailed: bool = False  # 是否取到了逐局明细
 
     @property

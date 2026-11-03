@@ -36,10 +36,12 @@ from .models import (
     Game,
     Match,
     MatchDetail,
+    PerkSet,
     PlayerStat,
     ProviderError,
     Tournament,
 )
+from .spells import spell_pairs as spell_pairs_of
 
 API = "https://www.scoregg.com/services/api_url.php"
 
@@ -92,6 +94,14 @@ def _float(value: Any) -> float:
         return float(str(value or "").strip())
     except ValueError:
         return 0.0
+
+
+def _is_blank_item(url: Any) -> bool:
+    """源站用 ``/items/none.png`` 表示空装备格。留着只会在卡片上摆一排灰块。"""
+    raw = str(url or "").strip().lower()
+    if not raw:
+        return True
+    return raw.rsplit("/", 1)[-1].startswith("none.")
 
 
 def _champion_token(url: Any) -> str:
@@ -239,6 +249,8 @@ class ScoreggProvider:
             start_time=str(raw.get("start_time") or ""),
             status=_int(raw.get("status")),
             winner=str(raw.get("win_team_short_name") or ""),
+            flag_a=str(raw.get("team_a_image") or ""),
+            flag_b=str(raw.get("team_b_image") or ""),
         )
 
     # ------------------------------------------------------------------ 对外
@@ -349,6 +361,8 @@ class ScoreggProvider:
             start_time=when_time,
             status=status,
             winner=winner,
+            flag_a=str(data.get("team_a_image_thumb") or data.get("team_a_image") or ""),
+            flag_b=str(data.get("team_b_image_thumb") or data.get("team_b_image") or ""),
         )
 
         games: list[Game] = []
@@ -402,6 +416,9 @@ class ScoreggProvider:
                 # 所以必须等所有局都学完再解析，否则先解析的那局全是「？」。
                 for game, blob in pairs:
                     self._fill_bans(game, blob, match_team_a, match_team_b)
+                # 符文在 data 顶层（按 playerID 索引），跟 result_list 平级
+                for game, blob in pairs:
+                    self._fill_perks(game, blob)
 
         logger.debug(f"[LOL赛事] scoregg 详情 {match_id}：{len(games)} 局")
         if self._book is not None:
@@ -487,7 +504,85 @@ class ScoreggProvider:
             if players:
                 setattr(game, f"players_{slot}", players)
 
+        # 队标与里程碑只在明细里有。摘要卡和详卡都靠这两个字段，拿不到就退回文字块
+        game.flag_a = str(pick(a_side, "flag") or "")
+        game.flag_b = str(pick(b_side, "flag") or "")
+        game.first_blood = self._first_side(blob, "firstBloodKill", a_side, b_side)
+        game.first_tower = self._first_side(blob, "firstTowerKill", a_side, b_side)
+        game.first_dragon = self._first_side(blob, "firstDragonKill", a_side, b_side)
+        game.first_baron = self._first_side(blob, "firstBaronKill", a_side, b_side)
+        game.first_herald = self._first_side(blob, "firstHerald", a_side, b_side)
+
         game.detailed = True
+
+    @staticmethod
+    def _first_side(blob: dict[str, Any], key: str, a_side: str, b_side: str) -> str:
+        """``dragon_list`` 里记着谁拿了一血/一塔/一龙，值是 ``"0"``/``"1"``。
+
+        哪个方拿了就返回 ``"a"`` 或 ``"b"``；都没拿或者这块数据缺失返回空串。
+        """
+        board = blob.get("dragon_list")
+        if not isinstance(board, dict):
+            return ""
+        for side in (a_side, b_side):
+            block = board.get(side)
+            if isinstance(block, dict) and _int(block.get(key)) == 1:
+                return "a" if side == a_side else "b"
+        return ""
+
+    def _fill_perks(self, game: Game, blob: dict[str, Any]) -> None:
+        """把符文页贴到选手身上。``perks`` 按 ``playerID`` 索引，与 slot 无关。"""
+        raw = blob.get("perks")
+        if not isinstance(raw, list):
+            return
+        book: dict[str, PerkSet] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            player_id = str(entry.get("playerID") or "")
+            slots = entry.get("data")
+            if not player_id or not isinstance(slots, list):
+                continue
+            book[player_id] = self._parse_perk_set(slots)
+        if not book:
+            return
+        for squad in (game.players_a, game.players_b):
+            for player in squad:
+                found = book.get(player.player_id)
+                if found is not None and found.ready:
+                    player.perks = found
+
+    @staticmethod
+    def _parse_perk_set(slots: list[Any]) -> PerkSet:
+        """``perkPrimaryStyle`` 是主系名，``perk0`` 是基石，``perk1..3`` 是小符文，
+        ``perkSubStyle`` 是副系，``perk4..5`` 是副系两枚。按 key 认，别按顺序猜。"""
+        primary = keystone = sub = ""
+        first: list[str] = []
+        second: list[str] = []
+        for item in slots:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            key = str(item.get("key") or "")
+            if key == "perkPrimaryStyle":
+                primary = name
+            elif key == "perkSubStyle":
+                sub = name
+            elif key == "perk0":
+                keystone = name
+            elif key in ("perk1", "perk2", "perk3"):
+                first.append(name)
+            elif key in ("perk4", "perk5"):
+                second.append(name)
+        return PerkSet(
+            primary=primary,
+            keystone=keystone,
+            primary_slots=first,
+            sub=sub,
+            sub_slots=second,
+        )
 
     @staticmethod
     def _sides(raw: dict[str, Any], match_team_a: str, match_team_b: str) -> tuple[str, str]:
@@ -562,6 +657,17 @@ class ScoreggProvider:
                 continue
             if self._book is not None and hero_id and champion:
                 self._book.learn(hero_id, champion)
+            # 出装给的是 8 个图标地址，源站没有道具 ID 也没有名字，只能原样存下来给卡片画。
+            # 空格子的地址是 ``/items/none.png``（一张灰底图），留着只会在卡片上摆一排灰块。
+            items = [
+                str(raw.get(f"{prefix}equip_{n}") or "")
+                for n in range(1, 9)
+                if raw.get(f"{prefix}equip_{n}")
+                and not _is_blank_item(raw.get(f"{prefix}equip_{n}"))
+            ]
+            # 召唤师技能的键不带 star_：``red_a_skill_1``
+            raw_spells = [str(raw.get(f"{side}_{slot}_skill_{n}") or "") for n in (1, 2)]
+            spell_pairs = spell_pairs_of(raw_spells)
             out.append(
                 PlayerStat(
                     nickname=nickname,
@@ -578,6 +684,17 @@ class ScoreggProvider:
                     part=_float(raw.get(f"{prefix}part")),
                     score=_float(raw.get(f"{prefix}score")),
                     beiguo=str(raw.get(f"{prefix}beiguo") or "") == "1",
+                    hero_level=_int(raw.get(f"{side}_hero_{slot}_lv")),
+                    damage_taken=_num(raw.get(f"{prefix}def_o")),
+                    damage_taken_pct=_float(raw.get(f"{prefix}def_p")),
+                    gold_per_min=_float(raw.get(f"{prefix}money_M")),
+                    damage_per_min=_float(raw.get(f"{prefix}atk_m")),
+                    items=items,
+                    spells=[name for name, _ in spell_pairs],
+                    spell_icons=[url for _, url in spell_pairs],
+                    hero_icon=str(raw.get(f"{side}_hero_{slot}_pic") or ""),
+                    honor=str(raw.get(f"{prefix}honor") or "").strip(),
+                    player_id=str(raw.get(f"{prefix}playerID") or ""),
                 )
             )
         return out

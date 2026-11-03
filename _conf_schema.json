@@ -71,6 +71,18 @@
     "hint": "超过这个数量截断并提示剩余场次，避免一条消息太长。默认 20。",
     "default": 20
   },
+  "image_cards": {
+    "type": "bool",
+    "description": "启用图片卡片",
+    "hint": "用 Pillow 画赛程卡、比赛摘要卡、单局详卡。需要安装 pillow 并有一个中文字体（缺任何一个都会自动退回纯文字，功能不受影响）。关掉可以省掉图标下载的流量。",
+    "default": true
+  },
+  "push_detail_cards": {
+    "type": "int",
+    "description": "推送附带的详情卡张数",
+    "hint": "每晚推送时，给已结束的比赛附几张单局详卡（含选手数据、符文、出装）。每张要多打一次详情接口，订阅了多个联赛时别调太大。0 = 不附图，默认 2。",
+    "default": 2
+  },
   "request_timeout": {
     "type": "int",
     "description": "接口超时（秒）",

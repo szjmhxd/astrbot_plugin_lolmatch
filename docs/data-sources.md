@@ -11,6 +11,7 @@
 | 英雄中文名 | Riot Data Dragon `zh_CN` | 无 | 退回英文 ID |
 | 源站英雄编号 → 英雄名 | 本地自学习（由 scoregg 数据养成） | — | 显示 `—` / `？` |
 | 法定节假日、调休 | `NateScarlet/holiday-cn` | 无 | 退化为「周一到周五」 |
+| 队标、英雄头像、装备、召唤师技能、符文图标 | `img.scoregg.com`（图片卡片用） | 无 | 跳过该图，卡片照画 |
 
 除 PandaScore 外全部无需注册、无需付费。四类数据互不依赖：英雄表拉不到不影响赛程，节假日缺失只影响提醒的时间判断。
 
@@ -109,6 +110,37 @@ GET https://img.scoregg.com/match/result/{resultID}.json
 
 明细按**红蓝方**组织，模型按 a/b 侧组织，映射靠 `red_teamID` 与 `teamID_a` 比对确认 a 侧是红还是蓝。这一步错了会导致整局的红蓝数据对调。
 
+**里程碑** `Game.first_*` ← 同一个 JSON 顶层的 `dragon_list`
+
+`dragon_list.{red,blue}` 里是 `firstBloodKill` / `firstTowerKill` / `firstDragonKill` /
+`firstBaronKill` / `firstHerald`，值是 `"0"` / `"1"`。哪个方是 1 就记到哪一侧。
+
+**天赋符文** `PerkSet` ← `data.perks[]`
+
+`perks` 在 `data` 顶层，和 `result_list` 平级，按 `playerID` 索引十名选手。
+每人是 `data: [{key, name, perkID, image, desc}]`，按 `key` 认位置：
+
+| `key` | 含义 |
+|---|---|
+| `perkPrimaryStyle` | 主系（精密 / 主宰 / 巫术 …） |
+| `perk0` | 基石符文 |
+| `perk1..3` | 主系三枚小符文 |
+| `perkSubStyle` | 副系 |
+| `perk4..5` | 副系两枚小符文 |
+
+**召唤师技能** 只给图标地址 `.../lol/skill/{id}.png`，那个 `id` 是拳头官方
+summoner spell ID（4 = 闪现、12 = 传送、11 = 惩戒 …），跨版本稳定，
+所以直接按表翻译，见 `lol/spells.py`。不额外请求，也不怕新英雄。
+
+**出装** 只给 8 个图标地址，**没有道具 ID，也没有名字**——文件名是上传时间戳，
+反查不到任何东西。所以卡片上直接画图标，文字版只写件数。
+
+> 空装备格的地址是 `.../items/none.png`（一张灰底图）。不过滤的话卡片上会摆一排灰块，
+> 看起来像加载失败。代码里按文件名过滤掉。
+
+**队标** 赛程接口给 `team_a_image`（100X100 缩略图），详情接口给
+`team_a_image_thumb`，逐局 JSON 里是 `{red,blue}_flag`。三处都有，优先用逐局的。
+
 **选手** `PlayerStat` ← CDN `{side}_star_{a..e}_*`
 
 | 内部字段 | 源字段 |
@@ -125,6 +157,16 @@ GET https://img.scoregg.com/match/result/{resultID}.json
 | `part`（参团率） | `{side}_star_{x}_part` |
 | `score` | `{side}_star_{x}_score` |
 | `beiguo`（背锅） | `{side}_star_{x}_beiguo == "1"` |
+| `hero_level` | `{side}_hero_{x}_lv` |
+| `hero_icon` | `{side}_hero_{x}_pic` |
+| `damage_taken` / `damage_taken_pct` | `{side}_star_{x}_def_o` / `_def_p` |
+| `gold_per_min` | `{side}_star_{x}_money_M` |
+| `damage_per_min` | `{side}_star_{x}_atk_m` |
+| `honor` | `{side}_star_{x}_honor`（源站给的是 `3,5` 这种编号） |
+| `player_id` | `{side}_star_{x}_playerID` |
+| `items` | `{side}_star_{x}_equip_1..8`（**只有图标地址，没有道具 ID**） |
+| `spells` / `spell_icons` | `{side}_{slot}_skill_1..2`（注意键里没有 `star_`） |
+| `perks` | `data.perks[]` 按 `playerID` 匹配 |
 
 ### 备源：PandaScore
 
@@ -234,6 +276,7 @@ https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json
 | `sessions.json` | 会话级设置、订阅列表、@ 策略、可提醒时段 | 用户指令 | 每次改设置 |
 | `champions.json` | Data Dragon `id`/`key` → 中文名；源站编号学习表 | Data Dragon + 自学习 | 拉取英雄表时、每场详情后 |
 | `holidays.json` | 各年放假日与调休日 | holiday-cn | 从开放日起每天探测一次 |
+| `icons/<hash前2位>/<hash>.img` | 卡片用的队标、英雄、装备等图标 | img.scoregg.com | 首次用到时下载，上限 3000 个文件 |
 
 三个文件都是原子写入（先写 `.tmp` 再 `replace`），中途断电不会留下半截 JSON。
 
@@ -249,7 +292,7 @@ https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json
 | Riot Games API | 只有玩家战绩，没有职业赛事数据；开发 key 24 小时过期，限流 20 次/1 秒 |
 | Leaguepedia | 数据最全，但限流策略严苛，机房 IP 基本被直接拒绝 |
 | `esports.op.gg` | 有可用的 GraphQL 赛程与双版队标，但**没有逐局数据**，撑不起「详情」；且返回时间为 UTC |
-| `static.lolesports.com` 队标 | 路径无规律，只能猜中个别战队，覆盖率不可用 |
+| `static.lolesports.com` 队标 | 路径无规律，只能猜中个别战队，覆盖率不可用。改用 scoregg 自带的 `team_a_image`（480–500px 透明底，主流联赛覆盖完整） |
 
 ## 七、换源要动哪些文件
 

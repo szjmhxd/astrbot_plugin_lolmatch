@@ -2,8 +2,9 @@
 
 设计取舍
 --------
-**只做文本，不做图片**：赛程的价值是「谁打谁、几比几、几点」，一张图只是把
-一次请求变成一次渲染 + 一次上传，还多一个外链图片失效的风险。
+**图 + 文两种形态**：赛程、比赛摘要、单局详情都有卡片（Pillow 画），
+文字版一直保留。取不到字体或画图失败就自动退回纯文字，功能不缩水——
+群里看不到图和收到一片报错，显然是前者更能接受。
 
 **数据源可换**：scoregg（玩加赛事）默认，PandaScore 兜底。上层只认
 ``lol.models`` 里的结构，换源不改指令。
@@ -31,6 +32,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
 
 from .lol import render
+from .lol.card import CardRenderer
 from .lol.champions import ChampionBook
 from .lol.models import ProviderError
 from .lol.notify import Notifier, mention_text, normalize_mention
@@ -66,6 +68,7 @@ class LolMatchPlugin(Star):
         self._champions: ChampionBook | None = None
         self._hub: DataHub | None = None
         self._notifier = Notifier(context)
+        self._cards: CardRenderer | None = None
         self._task: asyncio.Task | None = None
         self._warmup: asyncio.Task | None = None
 
@@ -96,6 +99,13 @@ class LolMatchPlugin(Star):
             book=self._champions,
         )
 
+        self._cards = CardRenderer(
+            data_dir / "icons",
+            enabled=self._cfg_bool("image_cards", True),
+        )
+        if not self._cards.available:
+            logger.warning("[LOL赛事] 图片卡片不可用（缺 Pillow 或中文字体），全部退回纯文字")
+
         self._task = asyncio.create_task(self._push_loop())
         self._warmup = asyncio.create_task(self._warm_up())
         logger.info("[LOL赛事] 插件已启动")
@@ -112,6 +122,8 @@ class LolMatchPlugin(Star):
                     logger.debug(f"[LOL赛事] 停止后台任务时忽略异常：{exc}")
         if self._hub is not None:
             await self._hub.close()
+        if self._cards is not None:
+            await self._cards.close()
         logger.info("[LOL赛事] 插件已停止")
 
     async def _warm_up(self) -> None:
@@ -306,20 +318,26 @@ class LolMatchPlugin(Star):
             return
 
         try:
-            text = await self._dispatch(event, umo, sub, rest)
+            result = await self._dispatch(event, umo, sub, rest)
         except ProviderError as exc:
             logger.warning(f"[LOL赛事] 数据源失败：{exc}")
-            text = (
+            result = (
                 f"⚠️ 数据源暂时不可用：\n{exc}\n\n稍后再试，或用「{_CMD} 设置 源 pandascore」换源。"
             )
         except Exception as exc:  # noqa: BLE001 指令级兜底，别让一条指令把插件带崩
             logger.error(f"[LOL赛事] 指令 {sub} 处理失败：{type(exc).__name__}: {exc}")
-            text = f"⚠️ 处理出错了：{type(exc).__name__}: {exc}"
+            result = f"⚠️ 处理出错了：{type(exc).__name__}: {exc}"
 
+        text, images = result if isinstance(result, tuple) else (result, [])
+        if images and await self._notifier.send(umo, text, images=images):
+            # 图已经连文字一起发出去了，别再回一条，否则群里出现两份内容
+            return
         if text:
             yield event.plain_result(text)
 
-    async def _dispatch(self, event: AstrMessageEvent, umo: str, sub: str, rest: list[str]) -> str:
+    async def _dispatch(
+        self, event: AstrMessageEvent, umo: str, sub: str, rest: list[str]
+    ) -> str | tuple[str, list[bytes]]:
         if sub in ("", "帮助", "help", "?", "？", "菜单"):
             return render.help_text(_CMD)
         if sub in ("今日", "今天", "today"):
@@ -354,36 +372,59 @@ class LolMatchPlugin(Star):
 
     # ------------------------------------------------------------------ 查询
 
-    async def _cmd_day(self, umo: str, day: date) -> str:
+    async def _cmd_day(self, umo: str, day: date) -> str | tuple[str, list[bytes]]:
         conf = self._effective(umo)
         day_str = day.strftime("%Y-%m-%d")
         assert self._hub is not None
         used, matches = await self._hub.call(
             "today", provider=conf["provider"], token=conf["token"], today=day_str
         )
-        return render.day_report(
+        limit = self._cfg_int("max_matches_per_day", 20)
+        text = render.day_report(
             day_str,
             matches,
             title=f"{day_str[5:]} 赛程",
-            limit=self._cfg_int("max_matches_per_day", 20),
+            limit=limit,
             source=self._label(used),
         )
+        label = self._label(used)
+        images = await self._schedule_cards(f"{day_str[5:]} 赛程", matches, limit, label)
+        if images:
+            # 有图就不用再把整张列表念一遍，一句话说明场次就够
+            if matches:
+                brief = f"📅 {day_str[5:]}　共 {len(matches)} 场"
+            else:
+                brief = f"📭 {day_str[5:]} 没有比赛"
+            return brief + f"　数据源 {label}", images
+        return text
 
-    async def _cmd_week(self, umo: str) -> str:
+    async def _cmd_week(self, umo: str) -> str | tuple[str, list[bytes]]:
         conf = self._effective(umo)
         assert self._hub is not None
         used, matches = await self._hub.call("week", provider=conf["provider"], token=conf["token"])
-        return render.week_report(
+        limit = self._cfg_int("max_matches_per_day", 20)
+        text = render.week_report(
             matches,
             days=max(1, self._cfg_int("week_match_days", 7)),
-            limit=self._cfg_int("max_matches_per_day", 20),
+            limit=limit,
             source=self._label(used),
         )
+        label = self._label(used)
+        images = await self._schedule_cards("LOL 近期赛程", matches, limit, label)
+        if images:
+            return f"🗓 LOL 近期赛程　共 {len(matches)} 场　数据源 {label}", images
+        return text
 
-    async def _cmd_detail(self, umo: str, rest: list[str]) -> str:
+    async def _schedule_cards(self, title: str, matches, limit: int, source: str) -> list[bytes]:
+        if self._cards is None or not self._cards.available or not matches:
+            return []
+        png = await self._cards.schedule(title=title, matches=matches, limit=limit, source=source)
+        return [png] if png else []
+
+    async def _cmd_detail(self, umo: str, rest: list[str]) -> str | tuple[str, list[bytes]]:
         token = rest[0] if rest else ""
         if not token.isdigit():
-            return f"用法：{_CMD} 详情 <比赛ID>（比赛ID 可以先查「{_CMD} 今日」拿到）"
+            return f"用法：{_CMD} 详情 <比赛ID> [局号]（比赛ID 可以先查「{_CMD} 今日」拿到）"
         conf = self._effective(umo)
         assert self._hub is not None
         # 第一次查详情时英雄表可能还没拉下来，这里补一次（之后都走缓存）
@@ -395,7 +436,24 @@ class LolMatchPlugin(Star):
         champ = self._champions.resolve if self._champions else (lambda _hid, tok: tok or "—")
         # 第二个参数看单局：BO5 全列出来太长，可以只查其中一局
         only = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else 0
-        return render.detail_report(detail, champ=champ, source=self._label(used), only=only)
+        label = self._label(used)
+        text = render.detail_report(detail, champ=champ, source=label, only=only, full=True)
+
+        images = await self._detail_cards(detail, only=only, source=label)
+        return (text, images) if images else text
+
+    async def _detail_cards(self, detail, *, only: int, source: str) -> list[bytes]:
+        """给详情配图：指定局就画那一局，否则画最后一局（决胜局信息最全）。"""
+        if self._cards is None or not self._cards.available:
+            return []
+        if not detail.games:
+            png = await self._cards.match(detail, source=source)
+            return [png] if png else []
+        games = [g for g in detail.games if g.index == only] if only else detail.games[-1:]
+        if not games:
+            return []
+        png = await self._cards.game(detail, games[0], source=source)
+        return [png] if png else []
 
     async def _cmd_tournaments(self, umo: str) -> str:
         conf = self._effective(umo)
@@ -701,7 +759,10 @@ class LolMatchPlugin(Star):
         upcoming = [m for m in tomorrow_matches if m.tournament_id in sub_set]
 
         text = render.push_report(today, tomorrow, results, upcoming, source=self._label(used))
-        ok = await self._notifier.send(umo, text, mode=conf["mention"], targets=conf["targets"])
+        images = await self._push_cards(results, conf, self._label(used))
+        ok = await self._notifier.send(
+            umo, text, mode=conf["mention"], targets=conf["targets"], images=images
+        )
         if not ok:
             return "发送失败，看日志里有没有平台报错。"
         return (
@@ -784,10 +845,51 @@ class LolMatchPlugin(Star):
             return
 
         text = render.push_report(today, tomorrow, results, upcoming, source=self._label(used))
-        ok = await self._notifier.send(umo, text, mode=conf["mention"], targets=conf["targets"])
+        images = await self._push_cards(results, conf, self._label(used))
+        ok = await self._notifier.send(
+            umo, text, mode=conf["mention"], targets=conf["targets"], images=images
+        )
         if ok:
             await self._store.mark_pushed(umo, today)
-            logger.info(f"[LOL赛事] 已推送 {umo}：{len(results)} 场战果、{len(upcoming)} 场赛程")
+            logger.info(
+                f"[LOL赛事] 已推送 {umo}：{len(results)} 场战果、{len(upcoming)} 场赛程、"
+                f"{len(images)} 张图"
+            )
+
+    async def _push_cards(self, results, conf: dict[str, Any], label: str) -> list[bytes]:
+        """给已结束的比赛配单局详卡。
+
+        每场要多打一次详情 + 每局一次 CDN，所以有个张数上限：
+        订阅了三个联赛又赶上比赛日的话，不限制会一次发十几张图。
+        """
+        if self._cards is None or not self._cards.available or self._hub is None:
+            return []
+        limit = self._cfg_int("push_detail_cards", 2)
+        if limit <= 0:
+            return []
+        images: list[bytes] = []
+        for match in results[:limit]:
+            if not match.finished:
+                continue
+            try:
+                _, detail = await self._hub.call(
+                    "detail",
+                    provider=conf["provider"],
+                    token=conf["token"],
+                    match_id=match.id,
+                )
+            except ProviderError as exc:
+                logger.debug(f"[LOL赛事] 推送补详情失败 #{match.id}：{exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001 补图失败不该拖垮推送
+                logger.debug(f"[LOL赛事] 推送补详情异常 #{match.id}：{type(exc).__name__}: {exc}")
+                continue
+            if not detail.games:
+                continue
+            png = await self._cards.game(detail, detail.games[-1], source=label)
+            if png:
+                images.append(png)
+        return images
 
     @staticmethod
     def _label(provider: str) -> str:

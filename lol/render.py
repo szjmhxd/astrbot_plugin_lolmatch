@@ -10,7 +10,15 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Callable
 
-from .models import Game, Match, MatchDetail, Tournament, status_icon, status_text
+from .models import (
+    Game,
+    Match,
+    MatchDetail,
+    PlayerStat,
+    Tournament,
+    status_icon,
+    status_text,
+)
 from .windows import window_text
 
 _Champ = Callable[[str, str], str]
@@ -130,8 +138,15 @@ def detail_report(
     champ: _Champ = _champ_default,
     source: str = "",
     only: int = 0,
+    full: bool = False,
+    prefix: str = "/lol",
 ) -> str:
-    """单场详情。``only`` 大于 0 时只看那一局（BO5 时避免刷屏）。"""
+    """单场详情。``only`` 大于 0 时只看那一局（BO5 时避免刷屏）。
+
+    ``full`` 控制选手表的详细程度：关掉时只给 KDA / 经济 / 伤害占比，
+    打开时才逐人附上召唤师技能、符文、补刀与参团率——一局十个人，
+    全打开大概 60 行，够塞满一屏，所以默认关。
+    """
     match = detail.match
     lines: list[str] = []
 
@@ -163,17 +178,40 @@ def detail_report(
         lines.append(f"这场 BO{match.best_of or len(detail.games)} 没有第 {only} 局。")
         return "\n".join(lines).strip()
 
+    # 选手表只留给最后一局：一场 BO5 若每局都列十个人，光选手就 100 行，
+    # 群里没人翻到底。前几局给资源对比，想细看某一局就带局号查。
+    detail_index = games[-1].index
     for game in games:
-        lines.extend(_game_block(game, match, champ))
+        show_squad = game.index == detail_index
+        lines.extend(
+            _game_block(
+                game,
+                match,
+                champ,
+                full=full and show_squad,
+                squads=show_squad,
+            )
+        )
         lines.append("")
+
+    if not only and len(games) > 1:
+        lines.append(f"… 选手数据只列了第 {detail_index} 局。")
+        lines.append(f"看其他局：{prefix} 详情 {match.id} <局号>")
 
     if source:
         lines.append(f"数据源 {source}")
     return "\n".join(lines).strip()
 
 
-def _game_block(game: Game, match: Match, champ: _Champ) -> list[str]:
-    """一局的完整呈现：局面、双方资源、BP、双方选手。"""
+def _game_block(
+    game: Game,
+    match: Match,
+    champ: _Champ,
+    *,
+    full: bool = False,
+    squads: bool = True,
+) -> list[str]:
+    """一局的完整呈现：局面、双方资源、里程碑、BP、双方选手。"""
     winner = {"a": match.team_a, "b": match.team_b}.get(game.win_side, "")
     head = f"第 {game.index} 局"
     if winner:
@@ -203,6 +241,10 @@ def _game_block(game: Game, match: Match, champ: _Champ) -> list[str]:
         objectives.append(f"远古 {game.elder_a} : {game.elder_b}")
     lines.append("  " + "　".join(objectives))
 
+    first = _first_line(game, match)
+    if first:
+        lines.append(f"  {first}")
+
     for bans, label in ((game.bans_a, match.team_a), (game.bans_b, match.team_b)):
         # 认出来的太少就整行不显示——「？ ？ ？」在群里只是噪音；
         # 认出一部分才用「？」占位，保证五个 Ban 的位置不错位
@@ -214,29 +256,77 @@ def _game_block(game: Game, match: Match, champ: _Champ) -> list[str]:
         (game.players_a, match.team_a),
         (game.players_b, match.team_b),
     ):
-        if not squad:
+        if not squads or not squad:
             continue
-        # 没有逐局明细时经济、伤害都是空的，就别摆两列「—」
-        rich = any(player.gold or player.damage_pct for player in squad)
-        lines.append(f"  {label}")
-        header = "    " + _pad("选手", 13) + _pad("英雄", 13) + _pad("KDA", 9)
-        lines.append((header + (_pad("经济", 7) + "伤害" if rich else "")).rstrip())
-        for player in squad:
-            row = (
-                f"    {_pad(player.nickname, 13)}"
-                f"{_pad(champ(player.hero_id, player.champion), 13)}"
-                f"{_pad(player.kda, 9)}"
-            )
-            if rich:
-                row += _pad(_gold(player.gold) if player.gold else "—", 7)
-                if player.damage_pct:
-                    row += f"{player.damage_pct:.0f}%"
-            if player.mvp:
-                row += " ★MVP"
-            elif player.beiguo:
-                row += " 背锅"
-            lines.append(row.rstrip())
+        lines.extend(_squad_block(squad, label, champ, full=full))
     return lines
+
+
+def _first_line(game: Game, match: Match) -> str:
+    """「一血 X　一塔 Y」这种里程碑行，一条都没有就返回空串。"""
+    parts: list[str] = []
+    for attribute, label in (
+        ("first_blood", "一血"),
+        ("first_tower", "一塔"),
+        ("first_dragon", "一龙"),
+        ("first_herald", "首先锋"),
+        ("first_baron", "首大龙"),
+    ):
+        side = getattr(game, attribute, "")
+        if side:
+            parts.append(f"{label} {match.team_a if side == 'a' else match.team_b}")
+    return "　".join(parts)
+
+
+def _squad_block(squad: list[PlayerStat], label: str, champ: _Champ, *, full: bool) -> list[str]:
+    """一支队伍的五人表。``full`` 时每人多一行技能 / 符文 / 出装。"""
+    rich = any(player.gold or player.damage_pct for player in squad)
+    lines = [f"  {label}"]
+    header = "    " + _pad("选手", 13) + _pad("英雄", 13) + _pad("KDA", 9)
+    if rich:
+        header += _pad("经济", 7) + _pad("伤害", 6)
+    if full:
+        header += _pad("补刀", 6) + "参团"
+    lines.append(header.rstrip())
+
+    for player in squad:
+        row = (
+            f"    {_pad(player.nickname, 13)}"
+            f"{_pad(champ(player.hero_id, player.champion), 13)}"
+            f"{_pad(player.kda, 9)}"
+        )
+        if rich:
+            row += _pad(_gold(player.gold) if player.gold else "—", 7)
+            row += _pad(f"{player.damage_pct:.0f}%" if player.damage_pct else "—", 6)
+        if full:
+            row += _pad(str(player.cs) if player.cs else "—", 6)
+            row += f"{player.part:.0f}%" if player.part else "—"
+        if player.mvp:
+            row += " ★MVP"
+        elif player.beiguo:
+            row += " 背锅"
+        lines.append(row.rstrip())
+
+        if not full:
+            continue
+        extra = _player_extra(player)
+        if extra:
+            lines.append("      " + extra)
+    return lines
+
+
+def _player_extra(player: PlayerStat) -> str:
+    """选手的第二行：等级、召唤师技能、符文、出装件数。"""
+    parts: list[str] = []
+    if player.hero_level:
+        parts.append(f"Lv{player.hero_level}")
+    if player.spells:
+        parts.append("/".join(player.spells))
+    if player.perks is not None and player.perks.ready:
+        parts.append(player.perks.full)
+    if player.items:
+        parts.append(f"出装 {len(player.items)} 件")
+    return "　".join(parts)
 
 
 # ---------------------------------------------------------------------- 联赛
