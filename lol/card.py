@@ -27,6 +27,7 @@ from .models import (
     Match,
     MatchDetail,
     PlayerStat,
+    SwissRow,
     bracket_edges,
     bracket_parents,
     bracket_rounds,
@@ -615,6 +616,133 @@ def bracket_card(
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
+    return canvas.to_bytes()
+
+
+# ---------------------------------------------------------------- 瑞士轮
+
+SWISS_ROW_H = 34
+SWISS_GROUP_H = 30
+SWISS_CHIP_W = 20
+SWISS_CHIP_GAP = 5
+SWISS_COL_GAP = 26
+
+# 分组顺序即画出来的顺序：出线的在上面，还有机会的在中间，出局的在右边一列
+# 标题只用汉字加颜色：msyh / simhei 都不带 ✅⏳❌ 这些 emoji，
+# 画上去就是三个豆腐块，比不加还难看。
+SWISS_GROUPS = (
+    ("qualified", "晋级", WIN),
+    ("playing", "还有机会", MUTED),
+    ("eliminated", "淘汰", RED),
+)
+
+
+def _swiss_row(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    row: SwissRow,
+    x: float,
+    y: float,
+) -> None:
+    """一队一行：色条、队标、队名、战绩，右边是自己走过的轮次。"""
+    tone = WIN if row.state == "qualified" else (RED if row.state == "eliminated" else MUTED)
+    dead = row.state == "eliminated"
+    canvas.rrect(x, y + 8, 3, 19, radius=1, fill=tone)
+    canvas.icon(
+        x + 10,
+        y + 5,
+        24,
+        icons.get(row.flag) if row.flag else None,
+        placeholder=row.team[:2],
+        size_hint=9,
+        bg=PANEL_2,
+    )
+    canvas.text(
+        x + 42,
+        y + 8,
+        canvas.fit(row.team, 13, 148, bold=True),
+        13,
+        fill=MUTED if dead else INK,
+        bold=True,
+    )
+    canvas.text_right(x + 250, y + 8, row.record, 13, fill=tone, bold=True)
+    for index, won in enumerate(row.path):
+        canvas.rrect(
+            x + 264 + index * (SWISS_CHIP_W + SWISS_CHIP_GAP),
+            y + 12,
+            SWISS_CHIP_W,
+            11,
+            radius=3,
+            fill=GREEN if won else RED,
+        )
+
+
+def swiss_card(
+    fonts: Fonts,
+    icons: dict[str, bytes],
+    *,
+    title: str,
+    rows: list[SwissRow],
+    subtitle: str = "",
+    source: str = "",
+) -> bytes | None:
+    """瑞士轮图：左边谁活着、右边谁回家，每队后面是自己那几轮的胜负格子。
+
+    画不成树的赛段以前只有一张流水清单——33 场逐条读下来，读者得自己在脑子里
+    记分。瑞士轮真正的问题是「谁出线了」，那就把答案直接摆出来：3 胜的镀金、
+    3 负的压暗，剩下的夹在中间。
+    """
+    if not fonts.available or not rows:
+        return None
+
+    buckets = [
+        (key, label, tone, [r for r in rows if r.state == key]) for key, label, tone in SWISS_GROUPS
+    ]
+    left = [item for item in buckets if item[0] in ("qualified", "playing") and item[3]]
+    right = [item for item in buckets if item[0] == "eliminated" and item[3]]
+    if not left and not right:
+        return None
+
+    col_w = (WIDTH - PAD * 2 - SWISS_COL_GAP) / 2
+    head_h = 44 + (20 if subtitle else 0)
+
+    def column_height(groups: list[tuple[str, str, str, list[SwissRow]]]) -> float:
+        if not groups:
+            return 0.0
+        return (
+            sum(SWISS_GROUP_H + len(items) * SWISS_ROW_H for _, _, _, items in groups)
+            + (len(groups) - 1) * 12
+        )
+
+    body = max(column_height(left), column_height(right))
+    height = PAD + head_h + body + 34 + PAD
+    canvas = Canvas(fonts, WIDTH, height)
+
+    canvas.text(PAD, PAD, title, 22, bold=True)
+    if subtitle:
+        canvas.text_right(WIDTH - PAD, PAD + 6, subtitle, 12, fill=MUTED)
+
+    top = PAD + head_h
+    for groups, x in ((left, PAD), (right, PAD + col_w + SWISS_COL_GAP)):
+        y = top
+        for _key, label, tone, items in groups:
+            canvas.text(x, y + 4, f"{label} {len(items)}", 13, fill=tone, bold=True)
+            y += SWISS_GROUP_H
+            for row in items:
+                _swiss_row(canvas, icons, row, x, y)
+                y += SWISS_ROW_H
+            y += 12
+
+    legend = "格子从左到右是第 1 轮起："
+    canvas.text(PAD, height - PAD - 14, legend, 11, fill=DIM)
+    legend_w = canvas.measure(legend, 11)
+    canvas.rrect(PAD + legend_w + 4, height - PAD - 10, 14, 8, radius=2, fill=GREEN)
+    canvas.text(PAD + legend_w + 22, height - PAD - 14, "胜", 11, fill=DIM)
+    canvas.rrect(PAD + legend_w + 48, height - PAD - 10, 14, 8, radius=2, fill=RED)
+    canvas.text(PAD + legend_w + 66, height - PAD - 14, "负", 11, fill=DIM)
+
+    if source:
+        canvas.text_right(WIDTH - PAD, height - PAD - 14, f"数据源 {source}", 11, fill=DIM)
     return canvas.to_bytes()
 
 
@@ -1405,6 +1533,33 @@ class CardRenderer:
                 icons,
                 title=title,
                 columns=columns,
+                subtitle=subtitle,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            return None
+
+    async def swiss(
+        self,
+        *,
+        title: str,
+        rows: list[SwissRow],
+        subtitle: str = "",
+        source: str = "",
+    ) -> bytes | None:
+        """瑞士轮图。画不成树的赛段里有相当一部分其实是瑞士轮。"""
+        if not self.available:
+            self._fail()
+            return None
+        try:
+            flags = [row.flag for row in rows if row.flag]
+            icons = await self.store.warm(flags)
+            return swiss_card(
+                self.fonts,
+                icons,
+                title=title,
+                rows=rows,
                 subtitle=subtitle,
                 source=source,
             )

@@ -40,6 +40,8 @@ from .lol.models import (
     day_label,
     paginate_by_day,
     stage_groups,
+    swiss_ready,
+    swiss_rows,
 )
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
@@ -56,6 +58,10 @@ from .lol.windows import (
 from .lol.workday import WorkdayCalendar, parse_month_day
 
 PLUGIN_NAME = "astrbot_plugin_lolmatch"
+
+
+# 指令的返回值：文字 / (配图文案, 图) / (配图文案, 图, 图发不出去时改发的全文)
+_Result = str | tuple[str, list[bytes]] | tuple[str, list[bytes], str]
 
 _CMD = "/lol"
 _AT_PREFIX = ("@", "＠")
@@ -334,16 +340,21 @@ class LolMatchPlugin(Star):
             logger.error(f"[LOL赛事] 指令 {sub} 处理失败：{type(exc).__name__}: {exc}")
             result = f"⚠️ 处理出错了：{type(exc).__name__}: {exc}"
 
-        text, images = result if isinstance(result, tuple) else (result, [])
+        # 第三条是「图发不出去时改发的全文」：配图文案只有一行概括，
+        # 平台一旦吞图，读者就只剩这一行了。带图发成功就别再补，否则群里两份内容。
+        if isinstance(result, tuple):
+            text, images = result[0], result[1]
+            fallback = result[2] if len(result) > 2 else text
+        else:
+            text, images, fallback = result, [], result
         if images and await self._notifier.send(umo, text, images=images):
-            # 图已经连文字一起发出去了，别再回一条，否则群里出现两份内容
             return
-        if text:
-            yield event.plain_result(text)
+        if fallback:
+            yield event.plain_result(fallback)
 
     async def _dispatch(
         self, event: AstrMessageEvent, umo: str, sub: str, rest: list[str]
-    ) -> str | tuple[str, list[bytes]]:
+    ) -> _Result:
         if sub in ("", "帮助", "help", "?", "？", "菜单"):
             return render.help_text(_CMD)
         if sub in ("今日", "今天", "today"):
@@ -475,7 +486,7 @@ class LolMatchPlugin(Star):
         )
         return render.tournament_list(items, source=self._label(used))
 
-    async def _cmd_tournament(self, umo: str, rest: list[str]) -> str | tuple[str, list[bytes]]:
+    async def _cmd_tournament(self, umo: str, rest: list[str]) -> _Result:
         token = rest[0] if rest else ""
         if not token.isdigit():
             return f"用法：{_CMD} 联赛详情 <联赛ID>（先用「{_CMD} 联赛」查 ID）"
@@ -500,7 +511,8 @@ class LolMatchPlugin(Star):
             if len(images) > 1:
                 # 多张图在多数客户端展开成一排缩略图，先说一句省得读者以为只有一张
                 brief += f"　分 {len(images)} 张"
-            return brief, images
+            # 第三项是图发不出去时的全文：只有一行概括等于什么都没给
+            return brief, images, text
         return text
 
     def _tournament_brief(self, name: str, matches, source: str) -> str:
@@ -542,12 +554,24 @@ class LolMatchPlugin(Star):
         # 再补每个赛段的晋级图：赛程列表看得出「哪天打谁」，看不出「谁把谁淘汰了」
         for stage, items in stage_groups(matches):
             columns = bracket_columns(items)
-            if not columns:
+            if columns:
+                png = await self._cards.bracket(
+                    title=f"晋级图 · {stage}",
+                    columns=columns,
+                    subtitle=f"{name}　{len(items)} 场",
+                    source=source,
+                )
+                if png:
+                    out.append(png)
                 continue
-            png = await self._cards.bracket(
-                title=f"晋级图 · {stage}",
-                columns=columns,
-                subtitle=f"{name}　{len(items)} 场",
+            # 树摆不出来不等于没得画：瑞士轮本来就是「谁出线」的积分跑道
+            rows = swiss_rows(items)
+            if not swiss_ready(rows):
+                continue
+            png = await self._cards.swiss(
+                title=f"{stage} · 晋级形势",
+                rows=rows,
+                subtitle=f"{name}　{len(rows)} 队 · {len(items)} 场",
                 source=source,
             )
             if png:

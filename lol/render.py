@@ -22,6 +22,8 @@ from .models import (
     stage_groups,
     status_icon,
     status_text,
+    swiss_ready,
+    swiss_rows,
 )
 from .windows import window_text
 
@@ -148,7 +150,7 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
 
 
 def bracket_lines(matches: list[Match]) -> list[str]:
-    """晋级图的纯文字版：每个能成树的赛段，一列一行。
+    """晋级图的纯文字版：能成树的赛段一列一行，瑞士轮改成出线/淘汰名单。
 
     图形版是主菜，但这几行要能独立看懂——没装字体、或者客户端吞图的时候，
     它是唯一的替代。
@@ -156,18 +158,35 @@ def bracket_lines(matches: list[Match]) -> list[str]:
     lines: list[str] = []
     for stage, items in stage_groups(matches):
         columns = bracket_columns(items)
-        if not columns:
+        if columns:
+            lines.append(f"【晋级 · {stage}】")
+            for label, column in zip(bracket_rounds(columns), columns, strict=True):
+                parts = []
+                for match in column:
+                    head = f"{match.start_date[5:]} " if match.start_date else ""
+                    if match.started:
+                        parts.append(
+                            f"{head}{match.name_a} {match.score_line} {match.name_b}".strip()
+                        )
+                    else:
+                        parts.append(f"{head}{match.name_a} vs {match.name_b}".strip())
+                lines.append(f"  {label}　" + "｜".join(parts))
             continue
-        lines.append(f"【晋级 · {stage}】")
-        for label, column in zip(bracket_rounds(columns), columns, strict=True):
-            parts = []
-            for match in column:
-                head = f"{match.start_date[5:]} " if match.start_date else ""
-                if match.started:
-                    parts.append(f"{head}{match.name_a} {match.score_line} {match.name_b}".strip())
-                else:
-                    parts.append(f"{head}{match.name_a} vs {match.name_b}".strip())
-            lines.append(f"  {label}　" + "｜".join(parts))
+        # 瑞士轮画不成树，但「谁出线」照样是能算出来的事实
+        rows = swiss_rows(items)
+        if not swiss_ready(rows):
+            continue
+        lines.append(f"【晋级形势 · {stage}】")
+        for key, mark in (
+            ("qualified", "✅ 出线"),
+            ("playing", "⏳ 在争"),
+            ("eliminated", "❌ 淘汰"),
+        ):
+            picked = [row for row in rows if row.state == key]
+            if not picked:
+                continue
+            body = "、".join(f"{row.team} {row.record}" for row in picked)
+            lines.append(f"  {mark}　{body}")
     return lines
 
 

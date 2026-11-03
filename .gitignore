@@ -11,3 +11,4 @@ venv/
 
 # 本地渲染验证时的图标缓存
 _icontest/
+images/

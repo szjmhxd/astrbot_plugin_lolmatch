@@ -208,6 +208,98 @@ def bracket_rounds(columns: list[list[Match]]) -> list[str]:
     return [f"第{i + 1}轮" for i in range(len(columns))]
 
 
+# ---------------------------------------------------------------- 瑞士轮
+
+# 瑞士轮不是树，是一条「先到 N 胜出线、先到 N 负出局」的积分跑道。
+# LOL 世界赛 / 季中赛都是 3 胜晋级、3 负淘汰：16 队打完正好 8 进 8 出
+# （2 个 3-0 + 3 个 3-1 + 3 个 3-2，对应 2 个 0-3 + 3 个 1-3 + 3 个 2-3）。
+SWISS_WIN_TARGET = 3
+SWISS_LOSS_TARGET = 3
+SWISS_TEAM_MIN = 8
+
+
+@dataclass(slots=True)
+class SwissRow:
+    """一支队在瑞士轮里的战绩轨迹。
+
+    ``path`` 是按时间顺序的每轮胜负，画成格子就是「连胜几场后栽在哪」，
+    比只看 3-2 这个数字直观——3-0 出线的是横扫，3-2 出线的是被逼到墙角再翻盘。
+    """
+
+    team: str = ""
+    wins: int = 0
+    losses: int = 0
+    path: list[bool] = field(default_factory=list)  # True 为胜
+    flag: str = ""
+
+    @property
+    def record(self) -> str:
+        return f"{self.wins}-{self.losses}"
+
+    @property
+    def state(self) -> str:
+        """``qualified`` 出线 / ``eliminated`` 出局 / ``playing`` 还有机会。"""
+        if self.wins >= SWISS_WIN_TARGET:
+            return "qualified"
+        if self.losses >= SWISS_LOSS_TARGET:
+            return "eliminated"
+        return "playing"
+
+    @property
+    def done(self) -> bool:
+        return self.state != "playing"
+
+
+def swiss_rows(matches: list[Match]) -> list[SwissRow]:
+    """把一段赛程算成每队的瑞士轮战绩。
+
+    只认**已结束**的比赛：没打完的不该记胜负，否则「3-0 出线」会提前成立。
+    出线/出局之后的场次也不再计入（源站偶尔会留下补赛或表演赛），
+    一个队真正的战绩就是打到 3 胜或 3 负那一刻为止。
+    """
+    rows: dict[str, SwissRow] = {}
+    order = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    for match in order:
+        if not match.finished or match.score_a == match.score_b:
+            continue
+        sides = (
+            (match.team_a, match.flag_a, match.score_a > match.score_b),
+            (match.team_b, match.flag_b, match.score_b > match.score_a),
+        )
+        for team, flag, won in sides:
+            if is_tbd(team):
+                continue
+            row = rows.get(team)
+            if row is None:
+                row = rows[team] = SwissRow(team=team)
+            if not row.flag:
+                row.flag = flag
+            if row.done:
+                continue
+            row.path.append(won)
+            if won:
+                row.wins += 1
+            else:
+                row.losses += 1
+    return sorted(rows.values(), key=lambda r: (-r.wins, r.losses, r.team))
+
+
+def swiss_ready(rows: list[SwissRow]) -> bool:
+    """够不够格当瑞士轮画。
+
+    光看「队多、有人三胜」不够——S 赛小组赛也是 16 队、也有人三胜，
+    但那是分组循环，不是瑞士轮。两条硬指标把它们分开：
+
+    - 队数是 2 的幂（瑞士轮为对半出线而生，16 进 8、8 进 4）；
+    - 没有队打过 5 场以上（先到 3 胜/3 负，最多 5 场，小组赛双循环会到 6）。
+    """
+    if len(rows) < SWISS_TEAM_MIN or len(rows) & (len(rows) - 1):
+        return False
+    if any(len(row.path) > SWISS_WIN_TARGET + SWISS_LOSS_TARGET - 1 for row in rows):
+        return False
+    return any(row.done for row in rows)
+
+
 def status_text(status: int) -> str:
     if 0 <= status < len(STATUS_TEXT):
         return STATUS_TEXT[status]
