@@ -23,12 +23,20 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    MARK_ADVANCE,
+    MARK_CHAMPION,
+    MARK_DROP,
+    MARK_OUT,
+    MARK_RUNNER,
+    MARK_TEXT,
+    DoubleElim,
     Game,
     Match,
     MatchDetail,
     PlayerStat,
     SwissLane,
     SwissRow,
+    bracket_columns,
     bracket_edges,
     bracket_rounds,
     bracket_strict,
@@ -562,6 +570,24 @@ BRACKET_GAP = 46  # 列间水平空隙，连线画在这里
 BRACKET_VGAP = 22  # 同列上下两场的距离（要放得下下一场的日期行）
 BRACKET_HEAD = 15  # 每场上面那行日期
 BRACKET_LINE = "#2f6b86"  # 晋级线：比灰线更有方向感，又不抢胜方的蓝
+BRACKET_LEGEND = (
+    (MARK_TEXT[MARK_ADVANCE], "#3fb950", ""),
+    (MARK_TEXT[MARK_OUT], "#ff7b85", ""),
+    (MARK_TEXT[MARK_CHAMPION], "#f5c542", ""),
+    (MARK_TEXT[MARK_RUNNER], "#a8b6c8", ""),
+)
+BRACKET_GOLD = "#f5c542"  # 总决赛：金框 + 金色行头
+BRACKET_GOLD_BG = "#6b5314"
+
+# 结局标记的配色。金/红两系里各有两个含义（夺冠 vs 晋级、淘汰 vs 跌入败者），
+# 光靠颜色分不开，所以标记一律配文字，颜色只是加速识别。
+MARK_TONE = {
+    MARK_ADVANCE: "#3fb950",
+    MARK_OUT: "#ff7b85",
+    MARK_DROP: "#ffb020",
+    MARK_CHAMPION: BRACKET_GOLD,
+    MARK_RUNNER: "#a8b6c8",
+}
 
 
 def _bracket_box(
@@ -571,58 +597,94 @@ def _bracket_box(
     x: float,
     y: float,
     w: float,
+    *,
+    marks: tuple[str, str] = ("", ""),
+    gold: bool = False,
 ) -> None:
     """一场比赛画成一个双行小块：上队一行、下队一行，胜方整行填色。
 
     填色而不是只给文字上色，是因为这张图经常被平台压到手机宽度的一半，
     13px 的字到那时候已经糊了，色块还认得出。
+
+    ``marks`` 是两行的结局标记（晋级 / 淘汰 / 夺冠 / 亚军 / 跌入败者），
+    写在比分左边的小字。只靠颜色分不出「晋级」和「夺冠」——两者都是金色系，
+    而「跌入败者组」和「淘汰」都是红色系，文字是唯一无歧义的信号。
+
+    ``gold`` 给总决赛用：金框 + 金头，视觉上从两条轨道里脱出来。
     """
-    canvas.text(x, y - BRACKET_HEAD + 1, match.clock, 9.5, fill=DIM)
+    head = BRACKET_HEAD
+    canvas.text(
+        x,
+        y - head + 1,
+        match.clock,
+        9.5,
+        fill=DIM if not gold else BRACKET_GOLD,
+    )
     parts = [f"#{match.id}" if match.id else "", f"BO{match.best_of}" if match.best_of else ""]
     tail = " · ".join(part for part in parts if part)
     if tail:
-        canvas.text_right(x + w, y - BRACKET_HEAD + 1, tail, 9.5, fill=DIM)
+        canvas.text_right(x + w, y - head + 1, tail, 9.5, fill=DIM if not gold else BRACKET_GOLD)
 
     top = y
-    canvas.rrect(x, top, w, BRACKET_BOX_H, radius=6, fill=PANEL)
+    canvas.rrect(
+        x,
+        top,
+        w,
+        BRACKET_BOX_H,
+        radius=6,
+        fill=PANEL,
+        outline=BRACKET_GOLD if gold else None,
+        width=1.4,
+    )
 
-    for index, (name, flag, score, won) in enumerate(
-        (
-            (match.name_a, match.flag_a, match.score_a, match.score_a > match.score_b),
-            (match.name_b, match.flag_b, match.score_b, match.score_b > match.score_a),
-        )
-    ):
+    rows = (
+        (match.name_a, match.flag_a, match.score_a, match.score_a > match.score_b, marks[0]),
+        (match.name_b, match.flag_b, match.score_b, match.score_b > match.score_a, marks[1]),
+    )
+    for index, (name, flag, score, won, mark) in enumerate(rows):
         row = index * (BRACKET_BOX_H // 2) + 4
         # 只有「已开打并且赢了」才填色；未开打和对阵未定都用中性灰
         decided = match.started
-        fill = SD_BLUE if decided and won else SD_DARK
-        ink = "#ffffff" if decided and won else MUTED
+        win_now = decided and won
+        fill = (BRACKET_GOLD_BG if gold else SD_BLUE) if win_now else SD_DARK
+        ink = "#ffffff" if win_now else MUTED
         canvas.rrect(x + 3, top + row - 1, w - 6, BRACKET_BOX_H // 2, radius=4, fill=fill)
-        canvas.icon(
-            x + 6,
-            top + row,
-            20,
-            None if match.pending else icons.get(flag),
-            radius=3,
-            placeholder="" if match.pending else name[:2],
-            size_hint=8,
-            bg=PANEL_2,
-        )
+        if not match.pending:  # 待定行不画队标位：空灰块比留白更碍眼
+            canvas.icon(
+                x + 6,
+                top + row,
+                20,
+                icons.get(flag),
+                radius=3,
+                placeholder=name[:2],
+                size_hint=8,
+                bg=PANEL_2,
+            )
+        mark_w = len(mark) * 8.5 + 6 if mark else 0
         canvas.text(
             x + 32,
             top + row + 3,
-            canvas.fit(name, 13, w - 74, bold=won),
+            canvas.fit(name, 13, w - 74 - mark_w, bold=win_now),
             13,
             fill=ink,
-            bold=won and decided,
+            bold=win_now,
         )
+        if mark:
+            canvas.text_right(
+                x + w - 38,
+                top + row + 5,
+                MARK_TEXT.get(mark, mark),
+                8.5,
+                fill=MARK_TONE.get(mark, MUTED),
+                bold=True,
+            )
         canvas.text_right(
             x + w - 8,
             top + row + 3,
             str(score) if decided else "–",
             13,
             fill=ink,
-            bold=won and decided,
+            bold=win_now,
         )
 
 
@@ -662,10 +724,11 @@ def bracket_card(
     *,
     title: str,
     columns: list[list[Match]],
+    marks: dict[str, tuple[str, str]] | None = None,
     subtitle: str = "",
     source: str = "",
 ) -> bytes | None:
-    """赛段晋级图：横向多列，列间画直角连线，胜方高亮，未定的写「待定」。
+    """单败晋级图：横向多列，列间画直角连线，胜方高亮，未定的写「待定」。
 
     列宽随列数自适应，但封顶 320——两列的赛段别拉成一整条长砖。
     """
@@ -681,10 +744,13 @@ def bracket_card(
     used = box_w * len(cols) + BRACKET_GAP * (len(cols) - 1)
     x0 = (WIDTH - used) / 2
 
-    top = PAD + 88
+    top = PAD + 104
     pitch = BRACKET_BOX_H + BRACKET_VGAP
     rounds = bracket_rounds(cols)
     edges = bracket_edges(cols, strict=bracket_strict(cols))
+    # 决赛 = 最后一列唯一那场。金框让它在整列卡片里一眼可辨——
+    # 单败图读者最先找的就是「谁夺冠」
+    champion = cols[-1][0] if len(cols[-1]) == 1 else None
 
     # 纵向位置：首列等距铺开，其余每场对准**真实来路**的中心。
     # 不能按 j//2 算——双败赛段（MSI 淘汰赛 7→4）那个位置关系根本不存在，
@@ -713,6 +779,16 @@ def bracket_card(
     canvas.text(PAD, PAD, title, 22, bold=True)
     if subtitle:
         canvas.text_right(WIDTH - PAD, PAD + 6, subtitle, 12, fill=MUTED)
+
+    # 图例：单败的四种结局全靠行内小字，字号只有 8.5，缩图后容易糊。
+    # 这里给一次对照，读者知道「绿=晋级、红=淘汰、金=夺冠」就够了
+    lx = WIDTH - PAD
+    for label, tone, _ in reversed(BRACKET_LEGEND):
+        lx -= canvas.measure(label, 9)
+        canvas.text(lx, PAD + 34, label, 9, fill=DIM)
+        lx -= 14
+        canvas.rrect(lx - 4, PAD + 35, 8, 8, radius=2, fill=tone)
+        lx -= 12
 
     # 先画连线再画块，线头被块盖住，不会露出来
     for (pc, pr), (cc, cr) in edges:
@@ -746,10 +822,300 @@ def bracket_card(
                 fill=DIM,
             )
         for j, match in enumerate(col):
-            _bracket_box(canvas, icons, match, x, ys[index][j], box_w)
+            _bracket_box(
+                canvas,
+                icons,
+                match,
+                x,
+                ys[index][j],
+                box_w,
+                marks=(marks or {}).get(match.id, ("", "")),
+                gold=match is champion,
+            )
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
+    return canvas.to_bytes()
+
+
+# ---------------------------------------------------------------- 双败淘汰
+
+# 双败不是一棵树，是**两条轨道 + 一场总决赛**：上面胜者组（赢着往上走），
+# 下面败者组（输一场掉下来），右边金框总决赛。硬画成单败树的话，败者组
+# 那几场会被塞进某一列里，看起来像「凭空多出来的比赛」，队伍旅程直接断。
+#
+# 列 = 日期而不是轮次：双败的两条轨道轮次对不齐（8 队时胜者组 3 轮、
+# 败者组 4 轮），按日期排才是同一根时间轴，读者能顺着日子往下看。
+DK_CARD_W = 246
+DK_GAP = 78  # 列间净空，连线走廊
+DK_BAND_PAD = 14
+DK_BAND_TITLE = 24
+DK_BAND_GAP = 30
+DK_MAX_W = 2400
+DK_LEGEND = (
+    (MARK_TEXT[MARK_DROP], "#ffb020", ""),
+    (MARK_TEXT[MARK_OUT], "#ff7b85", ""),
+    (MARK_TEXT[MARK_CHAMPION], "#f5c542", ""),
+    ("胜者续战", "#3bc1ff", "solid"),
+    ("跌入败者组", "#ffb020", "dash"),
+)
+DK_WIN_TINT = "#131b2c"  # 胜者组带底：极淡的蓝
+DK_LOSE_TINT = "#1d1710"  # 败者组带底：极淡的橙
+DK_WIN_EDGE = "#2d51c8"
+DK_LOSE_EDGE = "#c98a1e"
+
+
+def _deck_metrics(cols: int) -> tuple[float, float]:
+    """双败图的卡宽与列间距：列多就收窄，别把图拉成一条长墙。"""
+    gap = float(DK_GAP)
+    card_w = float(DK_CARD_W)
+    total = PAD * 2 + cols * card_w + (cols - 1) * gap
+    if total > DK_MAX_W and cols > 1:
+        gap = max(56.0, gap - (total - DK_MAX_W) / (cols - 1))
+        total = PAD * 2 + cols * card_w + (cols - 1) * gap
+    if total > DK_MAX_W:
+        card_w = (DK_MAX_W - PAD * 2 - (cols - 1) * gap) / cols
+    return max(196.0, card_w), gap
+
+
+def _box_row_y(top: float, side: int) -> float:
+    """卡片内第 ``side`` 行（0 上 1 下）的中心 y。连线端点要落在这里。"""
+    return top + BRACKET_BOX_H * 0.25 + side * (BRACKET_BOX_H / 2)
+
+
+def _band_height(buckets: list[list[Match]], pitch: float) -> float:
+    rows = max((len(bucket) for bucket in buckets), default=0)
+    if not rows:
+        return 0.0
+    return rows * pitch - BRACKET_VGAP + DK_BAND_PAD * 2 + DK_BAND_TITLE
+
+
+def _depth_rounds(matches: list[Match], *, winners: bool) -> list[list[Match]]:
+    """把一组比赛按「轮次」分列。
+
+    ``winners=True``（胜者组）直接用形状反推：1、2、4 递减，一场不漏。
+    ``winners=False``（败者组）不能这么推——败者组的轮次不是等比递减
+    （8 队是 ``[2,2,1,1]``，不是 ``[3,2,1]``）。
+
+    败者组按**轮次**分层：``该场轮次 = max(双方上一场所在轮次) + 1``，
+    刚从胜者组掉下来的队算第 0 轮。这里不能用「已打场次」代替轮次——
+    8 队赛制里 L1 分两天打完（各 1 场），两队都打完 L1 时场次都是 1，
+    但它们的下一场是 L3 不是 L2，用场次会算出 ``[2,3,1]`` 这种错列。
+    """
+    ordered = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    if winners:
+        columns = bracket_columns(ordered)
+        if columns:
+            return columns
+
+    depth: dict[str, int] = {}
+    buckets: dict[int, list[Match]] = {}
+    for match in ordered:
+        round_no = max(depth.get(match.team_a, 0), depth.get(match.team_b, 0)) + 1
+        buckets.setdefault(round_no, []).append(match)
+        for team in (match.team_a, match.team_b):
+            if team:
+                depth[team] = round_no
+    return [buckets[key] for key in sorted(buckets)]
+
+
+def double_elim_card(
+    fonts: Fonts,
+    icons: dict[str, bytes],
+    *,
+    title: str,
+    layout: DoubleElim,
+    marks: dict[str, tuple[str, str]],
+    subtitle: str = "",
+    source: str = "",
+) -> bytes | None:
+    """双败赛段：上胜者组、下败者组、右总决赛，连线是每支队的去向。
+
+    列 = **轮次**，不是日期。日期分列在 4 队 6 场上好看（参考资料就是这么画的），
+    到 8 队 14 场、跨 7 个比赛日就崩：同一棵树被切成 7 列，一条「胜决 → 总决赛」
+    的线要横穿四列，图上会糊成一团。按轮次排，最长的一条线也只跨两列。
+    """
+    if not fonts.available:
+        return None
+
+    every = [*layout.winner, *layout.loser]
+    if layout.final:
+        every.append(layout.final)
+    if not every:
+        return None
+
+    win_cols = _depth_rounds(layout.winner, winners=True) if layout.winner else []
+    lose_cols = _depth_rounds(layout.loser, winners=False) if layout.loser else []
+    if not win_cols and not lose_cols:
+        return None
+
+    # 列索引：胜者组第 i 轮在第 i 列，败者组第 k 轮在第 k 列（**右移一格**）。
+    # 这个错位不是排版偏好——败者组第一轮要等胜者组第一轮打完才能开始，
+    # 两者同列的话，「从胜者组掉下来」的连线就得往回走，线会在目标卡里绕圈。
+    win_offset = 0
+    lose_offset = 1
+    span = max(len(win_cols) + win_offset, len(lose_cols) + lose_offset)
+    cols = span + (1 if layout.final else 0)
+    card_w, gap = _deck_metrics(cols)
+    pitch = BRACKET_BOX_H + BRACKET_VGAP
+
+    head = PAD + 76  # 内容顶：给标题、图例和列头留位置
+    win_h = _band_height(win_cols, pitch)
+    lose_top = head + (win_h + DK_BAND_GAP if win_h else 0)
+    lose_h = _band_height(lose_cols, pitch)
+    content_bottom = lose_top + lose_h
+    height = int(content_bottom + 52 + PAD)
+
+    canvas = Canvas(fonts, int(PAD * 2 + cols * card_w + (cols - 1) * gap), height)
+    right = canvas.width - PAD
+
+    canvas.text(PAD, PAD, title, 22, bold=True)
+    if subtitle:
+        canvas.text_right(right, PAD + 6, subtitle, 12, fill=MUTED)
+
+    # 图例：四个结局标记 + 两种线。双败图的线有明确语义，
+    # 不写清楚「青色=赢着往上走 / 橙色虚线=输一场掉下去」，读者只能猜
+    lx = right
+    for label, tone, style in reversed(DK_LEGEND):
+        lx -= canvas.measure(label, 9)
+        canvas.text(lx, PAD + 34, label, 9, fill=DIM)
+        lx -= 14
+        if style == "solid":
+            canvas.seg(lx - 6, PAD + 39, lx + 6, PAD + 39, fill=tone, width=1.5)
+        elif style == "dash":
+            canvas.seg(lx - 6, PAD + 39, lx + 6, PAD + 39, fill=tone, width=1.2, dash=3.5)
+        else:
+            canvas.rrect(lx - 4, PAD + 35, 8, 8, radius=2, fill=tone)
+        lx -= 12
+
+    def col_x(index: int) -> float:
+        return PAD + index * (card_w + gap)
+
+    def band_span(columns: list[list[Match]], offset: int) -> tuple[int, int]:
+        """这一带有比赛的第一列和最后一列（含偏移），空带返回 ``(-1, -1)``。"""
+        filled = [i + offset for i, column in enumerate(columns) if column]
+        return (filled[0], filled[-1]) if filled else (-1, -1)
+
+    # 两条轨道的底衬与标题：没有这条浅色带，读者看不出「上下一分为二」，
+    # 会把败者组的比赛当成胜者组打歪了的一列
+    for top, high, tint, edge, label, count, columns, offset in (
+        (
+            head,
+            win_h,
+            DK_WIN_TINT,
+            DK_WIN_EDGE,
+            "胜者组",
+            len(layout.winner),
+            win_cols,
+            win_offset,
+        ),
+        (
+            lose_top,
+            lose_h,
+            DK_LOSE_TINT,
+            DK_LOSE_EDGE,
+            "败者组",
+            len(layout.loser),
+            lose_cols,
+            lose_offset,
+        ),
+    ):
+        first_col, tail_col = band_span(columns, offset)
+        if high <= 0 or tail_col < 0:
+            continue
+        x0 = col_x(first_col) - 10
+        band_w = col_x(tail_col) + card_w - x0 + 20
+        canvas.rrect(x0, top, band_w, high, radius=12, fill=tint)
+        canvas.rrect(x0, top, 3, high, radius=1.5, fill=edge)
+        canvas.text(x0 + 12, top + 7, f"{label} · {count} 场", 11, fill=edge, bold=True)
+
+    place: dict[str, tuple[float, float]] = {}
+    for top, columns, offset, tinted in (
+        (head + DK_BAND_TITLE + DK_BAND_PAD, win_cols, win_offset, bool(win_h)),
+        (lose_top + DK_BAND_TITLE + DK_BAND_PAD, lose_cols, lose_offset, bool(lose_h)),
+    ):
+        if not tinted:
+            continue
+        for index, column in enumerate(columns):
+            for order, match in enumerate(column):
+                place[match.id] = (col_x(index + offset), top + order * pitch)
+
+    final = layout.final
+    if final:
+        # 总决赛单独一列、垂直居中于两条轨道之间：它不属于任何一条轨道，
+        # 混进带里读者会以为它是胜者组（或败者组）的最后一场
+        last = span
+        place[final.id] = (
+            col_x(last),
+            head + (content_bottom - head - BRACKET_BOX_H) / 2,
+        )
+
+    # 连线：按「队」路由——某队在本赛段的上一次出场就是它的来路。
+    # 按胜负位路由会把「两队同时掉败者组」的线接反。
+    ordered = sorted(every, key=lambda m: (m.start_date, m.start_time, m.id))
+    drawing: list[tuple[float, float, float, float, bool | None]] = []
+    drawn: set[tuple[str, str, int]] = set()
+    for index, match in enumerate(ordered):
+        for side, team in enumerate((match.team_a, match.team_b)):
+            if not team or is_tbd(team) or match.id not in place:
+                continue
+            for previous in reversed(ordered[:index]):
+                sides = (previous.team_a, previous.team_b)
+                if team not in sides or previous.id not in place:
+                    continue
+                key = (previous.id, match.id, sides.index(team))
+                if key in drawn:
+                    break
+                drawn.add(key)
+                won = previous.winner == team if previous.finished else None
+                drawing.append(
+                    (
+                        place[previous.id][0] + card_w,
+                        _box_row_y(place[previous.id][1], sides.index(team)),
+                        place[match.id][0],
+                        _box_row_y(place[match.id][1], side),
+                        won,
+                    )
+                )
+                break
+
+    # 同一个走廊里的线**必须错轨**：xs 一样的边如果都走中点，会叠成一根
+    # 长竖线，读者会以为是同一条线从顶穿到底
+    rails: dict[tuple[int, int], list[tuple[float, float, float, float, bool | None]]] = {}
+    for edge in drawing:
+        rails.setdefault((round(edge[0]), round(edge[2])), []).append(edge)
+    for group in rails.values():
+        group.sort(key=lambda e: min(e[1], e[3]))
+        for slot, (x1, y1, x2, y2, won) in enumerate(group):
+            middle = (x1 + x2) / 2 + (slot - (len(group) - 1) / 2) * 6.5
+            xm = min(max(middle, x1 + 5), x2 - 5)
+            if won:
+                tone, dash = SD_CYAN, 0
+            elif won is False:
+                tone, dash = SD_AMBER, 4.0
+            else:  # 上一场还没打完，去向未定，别用败者色——那是谎报
+                tone, dash = BRACKET_LINE, 3.0
+            canvas.seg(x1, y1, xm, y1, fill=tone, width=1.3, dash=dash)
+            canvas.seg(xm, y1, xm, y2, fill=tone, width=1.3, dash=dash)
+            canvas.seg(xm, y2, x2, y2, fill=tone, width=1.3, dash=dash)
+
+    for match in every:
+        spot = place.get(match.id)
+        if not spot:
+            continue
+        _bracket_box(
+            canvas,
+            icons,
+            match,
+            spot[0],
+            spot[1],
+            card_w,
+            marks=marks.get(match.id, ("", "")),
+            gold=match is final,
+        )
+
+    if source:
+        canvas.text(PAD, height - PAD - 10, f"数据源 {source}", 11, fill=DIM)
     return canvas.to_bytes()
 
 
@@ -1949,6 +2315,7 @@ class CardRenderer:
         *,
         title: str,
         columns: list[list[Match]],
+        marks: dict[str, tuple[str, str]] | None = None,
         subtitle: str = "",
         source: str = "",
     ) -> bytes | None:
@@ -1964,6 +2331,38 @@ class CardRenderer:
                 icons,
                 title=title,
                 columns=columns,
+                marks=marks or {},
+                subtitle=subtitle,
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            return None
+
+    async def double_elim(
+        self,
+        *,
+        title: str,
+        layout: DoubleElim,
+        marks: dict[str, tuple[str, str]],
+        subtitle: str = "",
+        source: str = "",
+    ) -> bytes | None:
+        """双败淘汰图：上胜者组、下败者组、右总决赛。"""
+        if not self.available:
+            self._fail()
+            return None
+        try:
+            flat = [*layout.winner, *layout.loser]
+            if layout.final:
+                flat.append(layout.final)
+            icons = await self.store.warm(_collect_urls(flat, []))
+            return double_elim_card(
+                self.fonts,
+                icons,
+                title=title,
+                layout=layout,
+                marks=marks,
                 subtitle=subtitle,
                 source=source,
             )

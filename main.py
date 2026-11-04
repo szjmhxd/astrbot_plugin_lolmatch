@@ -35,9 +35,14 @@ from .lol import render
 from .lol.card import CardRenderer
 from .lol.champions import ChampionBook
 from .lol.models import (
+    FORMAT_DOUBLE,
+    FORMAT_SINGLE,
     ProviderError,
     bracket_columns,
     day_label,
+    detect_format,
+    double_elim_split,
+    match_marks,
     paginate_by_day,
     stage_groups,
     stage_has_result,
@@ -537,9 +542,10 @@ class LolMatchPlugin(Star):
     async def _tournament_cards(self, name: str, matches, source: str) -> list[bytes]:
         """联赛详情图：**一个赛段一张**，赛程和晋级图在同一张里。
 
-        上一版是「先按日期分页出清单，再单独补每个赛段的晋级图」——同一份数据
-        切出五张图，读者要在两张之间来回对，还得记住哪张是哪个赛段。
-        现在每个赛段只出一张：能成树就画树，是瑞士轮就画轮次跑道，都不成立才退回清单。
+        每个赛段只出一张图，画法由**赛制**决定（`detect_format` 从数据判，不看赛事名）：
+        单败画树、双败画「上胜者组 / 下败者组 / 右总决赛」、瑞士轮画轮次跑道；
+        三种都不成立才退回清单。判错的代价比画丑严重——双败当单败画，
+        败者组那几场会被塞进某一列，看不出谁是从胜者组掉下来的。
 
         刚开赛的赛段整段跳过：今天才第一场的话，画出来全是「待定」，
         没有结果可看，不如不出。
@@ -568,18 +574,40 @@ class LolMatchPlugin(Star):
     async def _stage_cards(
         self, name: str, stage: str, items, source: str, limit: int
     ) -> list[bytes]:
-        """单个赛段的一张图：树 → 瑞士轮跑道 → 清单，三级降级。"""
+        """单个赛段的一张图：单败树 / 双败双轨 / 瑞士轮跑道 → 清单，逐级降级。"""
         assert self._cards is not None
         days = sorted({m.start_date for m in items if m.start_date})
         span = day_label(days[0]) if len(days) == 1 else f"{days[0][5:]} ~ {days[-1][5:]}"
         title = f"{name} · {stage}"
+        fmt = detect_format(items)
+        marks = match_marks(items, fmt) if fmt else {}
 
-        columns = bracket_columns(items)
-        if columns:
+        # 双败：两条轨道 + 总决赛。**必须先于单败判断**——双败的场次形状
+        # 也是「1、2、4 递减」，当成单败画会变成一棵歪树，败者组那几场
+        # 被塞在某一列里，看不出谁是从胜者组掉下来的
+        if fmt == FORMAT_DOUBLE:
+            layout = double_elim_split(items)
+            if layout.ready:
+                png = await self._cards.double_elim(
+                    title=title,
+                    layout=layout,
+                    marks=marks,
+                    subtitle=(
+                        f"{len(items)} 场 · 双败淘汰｜赢着往上走，输一场掉进败者组"
+                        f"（橙色虚线），两败出局　{span}"
+                    ),
+                    source=source,
+                )
+                if png:
+                    return [png]
+
+        if fmt == FORMAT_SINGLE and bracket_columns(items):
+            columns = bracket_columns(items) or []
             png = await self._cards.bracket(
                 title=title,
                 columns=columns,
-                subtitle=f"{len(items)} 场 · 淘汰赛｜连线是上一场胜者的去向　{span}",
+                marks=marks,
+                subtitle=f"{len(items)} 场 · 单败淘汰｜一败出局　{span}",
                 source=source,
             )
             if png:

@@ -461,6 +461,220 @@ def swiss_ready(rows: list[SwissRow], *, rounds: int = 0) -> bool:
     return any(row.done for row in rows) or rounds >= 3
 
 
+# ---------------------------------------------------------------- 赛制识别
+
+# 三种赛制的版式完全不同：单败是一棵干净的树，双败是「上胜者组 / 下败者组 /
+# 右决赛」两条轨道，瑞士轮是一条按轮次铺开的跑道。**判错比画丑严重得多**：
+# 双败画成单败，败者组三场比赛没地方放，队伍旅程直接断；
+# 瑞士轮画成淘汰树，33 场挤进树里，战绩分档这个核心信息全丢。
+FORMAT_SINGLE = "single"
+FORMAT_DOUBLE = "double"
+FORMAT_SWISS = "swiss"
+
+FORMAT_LABEL = {
+    FORMAT_SINGLE: "单败淘汰",
+    FORMAT_DOUBLE: "双败淘汰",
+    FORMAT_SWISS: "瑞士轮",
+}
+
+# 行级结局标记。用语义键而不是颜色，配色交给渲染层。
+MARK_ADVANCE = "advance"  # 晋级（还有下一场）
+MARK_OUT = "out"  # 淘汰
+MARK_DROP = "drop"  # 第一败，掉进败者组
+MARK_CHAMPION = "champion"  # 夺冠
+MARK_RUNNER = "runner"  # 亚军
+
+MARK_TEXT = {
+    MARK_ADVANCE: "晋级",
+    MARK_OUT: "淘汰",
+    MARK_DROP: "跌入败者",
+    MARK_CHAMPION: "夺冠",
+    MARK_RUNNER: "亚军",
+}
+
+
+def _is_pow2(n: int) -> bool:
+    return n > 0 and not n & (n - 1)
+
+
+def stage_teams(matches: list[Match]) -> set[str]:
+    """这个赛段真实出现过的队名。占位的「待定」不算队。"""
+    out: set[str] = set()
+    for match in matches:
+        for team in (match.team_a, match.team_b):
+            if team and not is_tbd(team):
+                out.add(team)
+    return out
+
+
+def team_records(matches: list[Match]) -> dict[str, tuple[int, int, int]]:
+    """每队 ``(大场胜, 大场负, 出场次数)``，只算已结束的真实对局。"""
+    stats: dict[str, tuple[int, int, int]] = {}
+
+    def bump(team: str, win: int, loss: int, played: int) -> None:
+        if not team or is_tbd(team):
+            return
+        won, lost, seen = stats.get(team, (0, 0, 0))
+        stats[team] = (won + win, lost + loss, seen + played)
+
+    for match in sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id)):
+        if match.pending:
+            continue
+        bump(match.team_a, 0, 0, 1)
+        bump(match.team_b, 0, 0, 1)
+        if not match.finished or not match.team_a or not match.team_b:
+            continue
+        if match.score_a == match.score_b:
+            continue
+        won_a = match.score_a > match.score_b
+        bump(match.team_a, 1 if won_a else 0, 0 if won_a else 1, 0)
+        bump(match.team_b, 0 if won_a else 1, 1 if won_a else 0, 0)
+    return stats
+
+
+def detect_format(matches: list[Match]) -> str | None:
+    """这个赛段是单败、双败还是瑞士轮。**只看数据，不看赛事名。**
+
+    三条指纹按「误判代价」排序，前一条成立就不再往下试：
+
+    1. 有队输过 3 场、或有人打满 5 场 —— 单败和双败每队最多 2 负，不可能出现；
+    2. 场次 = 队数 - 1，且能切成严格整倍递减的树（4→2→1）—— 单败；
+    3. 场次 = 2N-2（双败的固定式），或形状不是整倍递减 —— 双败。
+
+    形状优先于场次式：赛段打到一半时 N 会因为「还没出场的队」偏小，
+    场次式对不上，但形状（1、2、4 反推的列）与打没打完无关。
+    """
+    if len(matches) < 2:
+        return None
+
+    stats = team_records(matches)
+    if stats:
+        max_loss = max(loss for _, loss, _ in stats.values())
+        max_played = max(played for _, _, played in stats.values())
+        if max_loss >= SWISS_LOSS_TARGET or max_played > SWISS_WIN_TARGET + SWISS_LOSS_TARGET - 1:
+            return FORMAT_SWISS
+
+    teams = len(stage_teams(matches))
+    columns = bracket_columns(matches)
+    if columns is None:
+        return FORMAT_SWISS if swiss_shaped(swiss_rows(matches)) else None
+
+    strict = bracket_strict(columns)
+    if strict and teams and len(matches) == teams - 1 and _is_pow2(teams):
+        return FORMAT_SINGLE
+    if strict:
+        return FORMAT_SINGLE
+    if teams and _is_pow2(teams) and len(matches) in (2 * teams - 2, 2 * teams - 1):
+        return FORMAT_DOUBLE
+    return FORMAT_DOUBLE
+
+
+@dataclass(slots=True)
+class DoubleElim:
+    """双败赛段拆成三条轨道：胜者组、败者组、总决赛。
+
+    判定只看一件事：**这场比赛开打前，双方各自输过几次**。
+    两个都没输过 = 胜者组；有一方输过 = 败者组。最后一场是总决赛
+    （双败的总决赛永远排在最后，而且它必然是一队 0 负对一队 1 负，
+    按「都 0 负才算胜者组」会把它误分到败者组，所以先摘出来）。
+    """
+
+    winner: list[Match]
+    loser: list[Match]
+    final: Match | None
+
+    @property
+    def ready(self) -> bool:
+        return bool(self.winner or self.loser)
+
+
+def double_elim_split(matches: list[Match]) -> DoubleElim:
+    ordered = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    if len(ordered) < 2:
+        return DoubleElim(ordered, [], None)
+
+    final = ordered[-1]
+    winner: list[Match] = []
+    loser: list[Match] = []
+    losses: dict[str, int] = {}
+    for match in ordered[:-1]:
+        a, b = match.team_a, match.team_b
+        if losses.get(a, 0) == 0 and losses.get(b, 0) == 0:
+            winner.append(match)
+        else:
+            loser.append(match)
+        if match.finished and a and b and not match.pending:
+            beaten = b if match.score_a > match.score_b else a
+            if beaten:
+                losses[beaten] = losses.get(beaten, 0) + 1
+    return DoubleElim(winner, loser, final)
+
+
+def match_marks(matches: list[Match], fmt: str) -> dict[str, tuple[str, str]]:
+    """每场两行的结局标记，``match.id -> (上行, 下行)``，没标记写空串。
+
+    单败按「一败出局」标四态：晋级 / 淘汰 / 夺冠 / 亚军。
+
+    双败**只标负方**（跌入败者 / 淘汰），胜方留空。理由：双败图的核心信息是
+    「谁掉下去了」，胜方每场都标「晋级」等于整列都在喊，反而看不出重点；
+    而且胜者组赢一场本来就不是出线，标「晋级」是错话。
+
+    标记按**队伍状态**算，不按场次类型猜——瑞士轮那次的 bug 教训：
+    只看「胜场到线」会把生死战败者的淘汰标记漏掉。
+    """
+    ordered = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    if not ordered:
+        return {}
+
+    final = ordered[-1]
+    marks: dict[str, tuple[str, str]] = {}
+
+    def put(match: Match, a: str, b: str) -> None:
+        if match.id:
+            marks[match.id] = (a, b)
+
+    if fmt == FORMAT_SINGLE:
+        for match in ordered:
+            if not match.finished or match.pending:
+                put(match, "", "")
+                continue
+            won_a = match.score_a > match.score_b
+            if match is final:
+                put(match, MARK_CHAMPION, MARK_RUNNER)
+                if not won_a:
+                    put(match, MARK_RUNNER, MARK_CHAMPION)
+            else:
+                put(match, MARK_ADVANCE, MARK_OUT)
+                if not won_a:
+                    put(match, MARK_OUT, MARK_ADVANCE)
+        return marks
+
+    # 双败：只标负方
+    losses: dict[str, int] = {}
+    for match in ordered:
+        a, b = match.team_a, match.team_b
+        if not match.finished or not a or not b or match.pending:
+            put(match, "", "")
+            continue
+        won_a = match.score_a > match.score_b
+        beaten = b if won_a else a
+        count = losses.get(beaten, 0) + 1
+        losses[beaten] = count
+
+        if match is final:
+            put(match, MARK_CHAMPION, MARK_RUNNER)
+            if not won_a:
+                put(match, MARK_RUNNER, MARK_CHAMPION)
+            continue
+
+        fate = MARK_OUT if count >= 2 else MARK_DROP
+        if won_a:
+            put(match, "", fate)
+        else:
+            put(match, fate, "")
+    return marks
+
+
 def status_text(status: int) -> str:
     if 0 <= status < len(STATUS_TEXT):
         return STATUS_TEXT[status]
@@ -515,6 +729,21 @@ class Match:
     winner: str = ""  # 胜方队名，未结束为空
     flag_a: str = ""  # 队标地址，卡片用；拿不到就画文字块
     flag_b: str = ""
+
+    def __post_init__(self) -> None:
+        """按比分补 ``winner``。
+
+        源站的 ``win_team_short_name`` 时有时无——MSI 淘汰赛 14 场全空。
+        空值不会报错，只会在图上悄悄出事：晋级图的「胜者续战」实线全靠它，
+        一旦为空，所有线都会掉进「败者续战」分支，整张图变成一片橙色虚线。
+        比分永远在，所以让比分兜底。
+        """
+        if self.winner or not self.finished or self.pending:
+            return
+        if self.score_a > self.score_b:
+            self.winner = self.team_a
+        elif self.score_b > self.score_a:
+            self.winner = self.team_b
 
     @property
     def day(self) -> str:

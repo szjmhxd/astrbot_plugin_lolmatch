@@ -11,6 +11,8 @@ import unicodedata
 from collections.abc import Callable
 
 from .models import (
+    FORMAT_DOUBLE,
+    FORMAT_SINGLE,
     Game,
     Match,
     MatchDetail,
@@ -19,6 +21,8 @@ from .models import (
     bracket_columns,
     bracket_rounds,
     day_label,
+    detect_format,
+    double_elim_split,
     stage_groups,
     status_icon,
     status_text,
@@ -149,29 +153,49 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
 # ---------------------------------------------------------------------- 联赛详情
 
 
+def _match_text(match: Match) -> str:
+    head = f"{match.start_date[5:]} " if match.start_date else ""
+    if match.started:
+        return f"{head}{match.name_a} {match.score_line} {match.name_b}".strip()
+    return f"{head}{match.name_a} vs {match.name_b}".strip()
+
+
 def bracket_lines(matches: list[Match]) -> list[str]:
     """晋级图的纯文字版：能成树的赛段一列一行，瑞士轮改成出线/淘汰名单。
 
     图形版是主菜，但这几行要能独立看懂——没装字体、或者客户端吞图的时候，
-    它是唯一的替代。
+    它是唯一的替代。所以双败这里也不套「第 N 轮」：胜者组、败者组、总决赛
+    三条轨道分开写，和图上看到的结构一一对应。
     """
     lines: list[str] = []
     for stage, items in stage_groups(matches):
+        fmt = detect_format(items)
+
+        if fmt == FORMAT_DOUBLE:
+            layout = double_elim_split(items)
+            if not layout.ready:
+                continue
+            lines.append(f"【双败 · {stage}】")
+            if layout.winner:
+                lines.append("  胜者组　" + "｜".join(_match_text(m) for m in layout.winner))
+            if layout.loser:
+                lines.append("  败者组　" + "｜".join(_match_text(m) for m in layout.loser))
+            if layout.final:
+                final = layout.final
+                tail = ""
+                if final.finished:
+                    tail = f"　→ {final.winner} 夺冠"
+                lines.append("  总决赛　" + _match_text(final) + tail)
+            continue
+
         columns = bracket_columns(items)
         if columns:
-            lines.append(f"【晋级 · {stage}】")
+            lines.append(f"【{'单败' if fmt == FORMAT_SINGLE else '晋级'} · {stage}】")
             for label, column in zip(bracket_rounds(columns), columns, strict=True):
-                parts = []
-                for match in column:
-                    head = f"{match.start_date[5:]} " if match.start_date else ""
-                    if match.started:
-                        parts.append(
-                            f"{head}{match.name_a} {match.score_line} {match.name_b}".strip()
-                        )
-                    else:
-                        parts.append(f"{head}{match.name_a} vs {match.name_b}".strip())
-                lines.append(f"  {label}　" + "｜".join(parts))
+                body = "｜".join(_match_text(m) for m in column)
+                lines.append(f"  {label}　{body}")
             continue
+
         # 瑞士轮画不成树，但「谁出线」照样是能算出来的事实
         rows = swiss_rows(items)
         if not swiss_ready(rows):
