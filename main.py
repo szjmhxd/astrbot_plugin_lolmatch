@@ -40,8 +40,11 @@ from .lol.models import (
     day_label,
     paginate_by_day,
     stage_groups,
+    stage_has_result,
+    swiss_lanes,
     swiss_ready,
     swiss_rows,
+    swiss_standings,
 )
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
@@ -526,53 +529,91 @@ class LolMatchPlugin(Star):
         brief = f"🏆 {name}　{span}　共 {len(matches)} 场"
         if len(stages) > 1:
             brief += f" · {'／'.join(label for label, _ in stages)}"
+        pending = self._pending_stages(matches)
+        if pending:
+            brief += f"（{'、'.join(pending)} 尚无赛果，未出图）"
         return f"{brief}　数据源 {source}"
 
     async def _tournament_cards(self, name: str, matches, source: str) -> list[bytes]:
-        """联赛详情图。超过一页就按日期边界续页，绝不静默截断。"""
+        """联赛详情图：**一个赛段一张**，赛程和晋级图在同一张里。
+
+        上一版是「先按日期分页出清单，再单独补每个赛段的晋级图」——同一份数据
+        切出五张图，读者要在两张之间来回对，还得记住哪张是哪个赛段。
+        现在每个赛段只出一张：能成树就画树，是瑞士轮就画轮次跑道，都不成立才退回清单。
+
+        刚开赛的赛段整段跳过：今天才第一场的话，画出来全是「待定」，
+        没有结果可看，不如不出。
+        """
         if self._cards is None or not self._cards.available:
             return []
+        out: list[bytes] = []
         limit = self._cfg_int("tournament_card_limit", 36)
-        days = sorted({m.start_date for m in matches if m.start_date})
-        span = f"{days[0][5:]} ~ {days[-1][5:]}" if len(days) > 1 else ""
-        pages = paginate_by_day(matches, limit)
+        for stage, items in stage_groups(matches):
+            if not stage_has_result(items):
+                continue
+            out.extend(await self._stage_cards(name, stage, items, source, limit))
+        return out
+
+    def _pending_stages(self, matches) -> list[str]:
+        """一个结果都没有的赛段，配文里点一句，免得读者以为漏画了。"""
+        notes: list[str] = []
+        for stage, items in stage_groups(matches):
+            if stage_has_result(items) or not items:
+                continue
+            days = sorted({m.start_date for m in items if m.start_date})
+            when = f" {days[0][5:]} 起" if days else ""
+            notes.append(f"{stage}{when}")
+        return notes
+
+    async def _stage_cards(
+        self, name: str, stage: str, items, source: str, limit: int
+    ) -> list[bytes]:
+        """单个赛段的一张图：树 → 瑞士轮跑道 → 清单，三级降级。"""
+        assert self._cards is not None
+        days = sorted({m.start_date for m in items if m.start_date})
+        span = day_label(days[0]) if len(days) == 1 else f"{days[0][5:]} ~ {days[-1][5:]}"
+        title = f"{name} · {stage}"
+
+        columns = bracket_columns(items)
+        if columns:
+            png = await self._cards.bracket(
+                title=title,
+                columns=columns,
+                subtitle=f"{len(items)} 场 · 淘汰赛｜连线是上一场胜者的去向　{span}",
+                source=source,
+            )
+            if png:
+                return [png]
+
+        # 树摆不出来不等于没得画：瑞士轮本来就是「先到 3 胜出线」的积分跑道
+        lanes = swiss_lanes(items)
+        rows = swiss_rows(items)
+        if lanes and swiss_ready(rows, rounds=len(lanes)):
+            png = await self._cards.swiss(
+                title=title,
+                columns=lanes,
+                standings=swiss_standings(rows),
+                subtitle=(
+                    f"{len(rows)} 队 · {len(lanes)} 轮 · {len(items)} 场"
+                    f"｜三胜晋级、三负淘汰；每轮按赛前战绩分档（胜多在上）　{span}"
+                ),
+                source=source,
+            )
+            if png:
+                return [png]
+
+        # 兜底：画不成图的赛段老老实实列清单，一场都不能少
+        pages = paginate_by_day(items, limit)
         out: list[bytes] = []
         for index, page in enumerate(pages, 1):
-            title = f"LOL 联赛详情 · {name}"
-            if len(pages) > 1:
-                title += f"（{index}/{len(pages)}）"
+            page_title = title if len(pages) == 1 else f"{title}（{index}/{len(pages)}）"
             png = await self._cards.tournament(
-                title=title,
+                title=page_title,
                 matches=page,
                 subtitle=span,
                 limit=0,
                 source=source,
-                total=len(matches),
-            )
-            if png:
-                out.append(png)
-        # 再补每个赛段的晋级图：赛程列表看得出「哪天打谁」，看不出「谁把谁淘汰了」
-        for stage, items in stage_groups(matches):
-            columns = bracket_columns(items)
-            if columns:
-                png = await self._cards.bracket(
-                    title=f"晋级图 · {stage}",
-                    columns=columns,
-                    subtitle=f"{name}　{len(items)} 场",
-                    source=source,
-                )
-                if png:
-                    out.append(png)
-                continue
-            # 树摆不出来不等于没得画：瑞士轮本来就是「谁出线」的积分跑道
-            rows = swiss_rows(items)
-            if not swiss_ready(rows):
-                continue
-            png = await self._cards.swiss(
-                title=f"{stage} · 晋级形势",
-                rows=rows,
-                subtitle=f"{name}　{len(rows)} 队 · {len(items)} 场",
-                source=source,
+                total=len(items),
             )
             if png:
                 out.append(png)

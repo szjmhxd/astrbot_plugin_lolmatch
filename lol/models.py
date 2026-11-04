@@ -57,6 +57,15 @@ def stage_groups(matches: list[Match]) -> list[tuple[str, list[Match]]]:
     return list(groups.items())
 
 
+def stage_has_result(matches: list[Match]) -> bool:
+    """这个赛段有没有打完过一场。
+
+    刚开赛的赛段（今天才第一场）整段都是占位，画成树或格子都只有「待定」，
+    不如不出图——读者点开联赛详情要的是已有结果，不是预告。
+    """
+    return any(match.finished for match in matches)
+
+
 def paginate_by_day(matches: list[Match], limit: int) -> list[list[Match]]:
     """按**日期边界**切页，每页不超过 ``limit`` 场。
 
@@ -224,6 +233,8 @@ class SwissRow:
 
     ``path`` 是按时间顺序的每轮胜负，画成格子就是「连胜几场后栽在哪」，
     比只看 3-2 这个数字直观——3-0 出线的是横扫，3-2 出线的是被逼到墙角再翻盘。
+    ``game_wins`` / ``game_losses`` 是小局分，积分榜上和大场分并列——同为 3-2，
+    6-4 和 6-7 是两种状态。
     """
 
     team: str = ""
@@ -231,10 +242,20 @@ class SwissRow:
     losses: int = 0
     path: list[bool] = field(default_factory=list)  # True 为胜
     flag: str = ""
+    game_wins: int = 0
+    game_losses: int = 0
 
     @property
     def record(self) -> str:
         return f"{self.wins}-{self.losses}"
+
+    @property
+    def games(self) -> str:
+        return f"{self.game_wins}-{self.game_losses}"
+
+    @property
+    def diff(self) -> int:
+        return self.game_wins - self.game_losses
 
     @property
     def state(self) -> str:
@@ -250,6 +271,58 @@ class SwissRow:
         return self.state != "playing"
 
 
+@dataclass(slots=True)
+class SwissLane:
+    """瑞士轮图上的一个格子，也就是一场对局。
+
+    ``wins`` / ``losses`` 是**赛前**战绩，决定它落在哪一档；``decide`` 是这场
+    的性质。两者都必须按赛前状态算——算完再更新，否则 3-0 出线那一场会被
+    记成 3-0 之后，标成「常规轮」。
+    """
+
+    match: Match
+    round: int = 1
+    wins: int = 0
+    losses: int = 0
+    decide: str = "none"  # none 常规 / adv 晋级战 / out 淘汰战 / both 生死战
+
+    @property
+    def band(self) -> tuple[int, int]:
+        return (self.wins, self.losses)
+
+    @property
+    def decided(self) -> bool:
+        return self.match.finished and self.match.score_a != self.match.score_b
+
+    @property
+    def winner(self) -> str:
+        if not self.decided:
+            return ""
+        return self.match.team_a if self.match.score_a > self.match.score_b else self.match.team_b
+
+    @property
+    def loser(self) -> str:
+        if not self.decided:
+            return ""
+        return self.match.team_b if self.match.score_a > self.match.score_b else self.match.team_a
+
+
+def _swiss_decide(wins: int, losses: int) -> str:
+    """这一场是晋级战、淘汰战、还是两样都占的生死战。
+
+    必须双向判：只看「胜场摸到晋级线」会给 2-2 生死战的败者漏标淘汰。
+    """
+    win_edge = wins == SWISS_WIN_TARGET - 1
+    loss_edge = losses == SWISS_LOSS_TARGET - 1
+    if win_edge and loss_edge:
+        return "both"
+    if win_edge:
+        return "adv"
+    if loss_edge:
+        return "out"
+    return "none"
+
+
 def swiss_rows(matches: list[Match]) -> list[SwissRow]:
     """把一段赛程算成每队的瑞士轮战绩。
 
@@ -263,10 +336,10 @@ def swiss_rows(matches: list[Match]) -> list[SwissRow]:
         if not match.finished or match.score_a == match.score_b:
             continue
         sides = (
-            (match.team_a, match.flag_a, match.score_a > match.score_b),
-            (match.team_b, match.flag_b, match.score_b > match.score_a),
+            (match.team_a, match.flag_a, match.score_a, match.score_b),
+            (match.team_b, match.flag_b, match.score_b, match.score_a),
         )
-        for team, flag, won in sides:
+        for team, flag, own, foe in sides:
             if is_tbd(team):
                 continue
             row = rows.get(team)
@@ -276,28 +349,116 @@ def swiss_rows(matches: list[Match]) -> list[SwissRow]:
                 row.flag = flag
             if row.done:
                 continue
-            row.path.append(won)
-            if won:
+            row.path.append(own > foe)
+            row.game_wins += own
+            row.game_losses += foe
+            if own > foe:
                 row.wins += 1
             else:
                 row.losses += 1
     return sorted(rows.values(), key=lambda r: (-r.wins, r.losses, r.team))
 
 
-def swiss_ready(rows: list[SwissRow]) -> bool:
-    """够不够格当瑞士轮画。
+def swiss_standings(rows: list[SwissRow]) -> list[tuple[int, SwissRow]]:
+    """积分榜：``(名次, 队)``。同大场战绩共享名次（1、2、3、4、4、6…）。"""
+    ordered = sorted(
+        rows,
+        key=lambda r: (-r.wins, r.losses, -r.diff, -r.game_wins, r.team),
+    )
+    out: list[tuple[int, SwissRow]] = []
+    rank = 0
+    prev: tuple[int, int] | None = None
+    for index, row in enumerate(ordered, 1):
+        key = (row.wins, row.losses)
+        if key != prev:
+            rank = index
+            prev = key
+        out.append((rank, row))
+    return out
 
-    光看「队多、有人三胜」不够——S 赛小组赛也是 16 队、也有人三胜，
-    但那是分组循环，不是瑞士轮。两条硬指标把它们分开：
 
-    - 队数是 2 的幂（瑞士轮为对半出线而生，16 进 8、8 进 4）；
-    - 没有队打过 5 场以上（先到 3 胜/3 负，最多 5 场，小组赛双循环会到 6）。
+def swiss_lanes(matches: list[Match]) -> list[list[SwissLane]] | None:
+    """把瑞士轮摆成「一轮一列」的格子，摆不出来返回 ``None``。
+
+    轮次靠**回溯**算，不信任何静态标签：一支队打第几场，就是第几轮。
+    摆不成形的都不画——对阵未定（没队名，接不上线）、双方已赛场次不等
+    （数据本身矛盾）、轮次编号断档（少了一轮的赛程），这三种情况画出来都是错的。
+    """
+    if not matches:
+        return None
+
+    order = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    if any(is_tbd(m.team_a) or is_tbd(m.team_b) for m in order):
+        return None
+
+    wins: dict[str, int] = {}
+    losses: dict[str, int] = {}
+    played: dict[str, int] = {}
+    columns: dict[int, list[SwissLane]] = {}
+
+    for match in order:
+        a, b = match.team_a, match.team_b
+        if played.get(a, 0) != played.get(b, 0):
+            return None
+        number = played.get(a, 0) + 1
+        lane = SwissLane(
+            match=match,
+            round=number,
+            wins=wins.get(a, 0),
+            losses=losses.get(a, 0),
+            decide=_swiss_decide(wins.get(a, 0), losses.get(a, 0)),
+        )
+        columns.setdefault(number, []).append(lane)
+        played[a] = played.get(a, 0) + 1
+        played[b] = played.get(b, 0) + 1
+        if lane.decided:
+            if match.score_a > match.score_b:
+                wins[a] = wins.get(a, 0) + 1
+                losses[b] = losses.get(b, 0) + 1
+            else:
+                wins[b] = wins.get(b, 0) + 1
+                losses[a] = losses.get(a, 0) + 1
+
+    rounds = sorted(columns)
+    if rounds != list(range(1, len(rounds) + 1)):
+        return None
+    return [columns[number] for number in rounds]
+
+
+def swiss_round_dates(columns: list[list[SwissLane]]) -> list[str]:
+    """每一列的日期标签：同一天就写一天，跨天写区间。"""
+    out: list[str] = []
+    for column in columns:
+        days = [lane.match.start_date for lane in column if lane.match.start_date]
+        if not days:
+            out.append("")
+            continue
+        head, tail = min(days), max(days)
+        out.append(day_label(head) if head == tail else f"{head[5:]} ~ {tail[5:]}")
+    return out
+
+
+def swiss_shaped(rows: list[SwissRow]) -> bool:
+    """形状像不像瑞士轮。
+
+    光看「队多」不够——S 赛小组赛也是 16 队，但那是分组循环。两条硬指标：
+    队数是 2 的幂（瑞士轮为对半出线而生，16 进 8、8 进 4）；
+    没有队打过 5 场以上（先到 3 胜/3 负，最多 5 场，双循环小组赛会到 6）。
     """
     if len(rows) < SWISS_TEAM_MIN or len(rows) & (len(rows) - 1):
         return False
-    if any(len(row.path) > SWISS_WIN_TARGET + SWISS_LOSS_TARGET - 1 for row in rows):
+    return not any(len(row.path) > SWISS_WIN_TARGET + SWISS_LOSS_TARGET - 1 for row in rows)
+
+
+def swiss_ready(rows: list[SwissRow], *, rounds: int = 0) -> bool:
+    """够不够格画成「轮次跑道」。
+
+    除了形状，还得有东西可看：要么已经有人出线/出局，要么赛程已经走过三轮
+    （``rounds``）——瑞士轮打了两轮时，画出来只是一张对阵表，不如直接列赛程。
+    """
+    if not swiss_shaped(rows):
         return False
-    return any(row.done for row in rows)
+    return any(row.done for row in rows) or rounds >= 3
 
 
 def status_text(status: int) -> str:

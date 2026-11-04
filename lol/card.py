@@ -27,13 +27,15 @@ from .models import (
     Match,
     MatchDetail,
     PlayerStat,
+    SwissLane,
     SwissRow,
     bracket_edges,
-    bracket_parents,
     bracket_rounds,
     bracket_strict,
     day_label,
+    is_tbd,
     stage_groups,
+    swiss_round_dates,
 )
 
 try:
@@ -173,6 +175,77 @@ class Canvas:
     def line(self, x1: float, y1: float, x2: float, y2: float, *, fill: str = LINE) -> None:
         s = self.scale
         self.draw.line([int(x1 * s), int(y1 * s), int(x2 * s), int(y2 * s)], fill=fill, width=s)
+
+    def seg(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        *,
+        fill: str = LINE,
+        width: float = 1,
+        dash: float = 0,
+    ) -> None:
+        """画一条横平竖直的线，``dash`` 非零就是虚线。
+
+        Pillow 没有虚线样式，只能自己按段画。只支持水平/垂直是有意为之：
+        瑞士轮和晋级图的连线全是直角折线，斜线一条都不该有。
+        """
+        s = self.scale
+        pen = max(1, int(width * s))
+        length = abs(x2 - x1) + abs(y2 - y1)
+        if dash <= 0 or length <= 0:
+            self.draw.line(
+                [int(x1 * s), int(y1 * s), int(x2 * s), int(y2 * s)], fill=fill, width=pen
+            )
+            return
+        step = max(1.5, dash)
+        cursor = 0.0
+        while cursor < length:
+            end = min(cursor + step, length)
+            ratio_a, ratio_b = cursor / length, end / length
+            self.draw.line(
+                [
+                    int((x1 + (x2 - x1) * ratio_a) * s),
+                    int((y1 + (y2 - y1) * ratio_a) * s),
+                    int((x1 + (x2 - x1) * ratio_b) * s),
+                    int((y1 + (y2 - y1) * ratio_b) * s),
+                ],
+                fill=fill,
+                width=pen,
+            )
+            cursor = end + step * 0.75
+
+    def vtext(
+        self,
+        x: float,
+        y: float,
+        text: str,
+        size: int,
+        *,
+        fill: str = INK,
+    ) -> None:
+        """竖排（逆时针 90 度）的短标签，给分档条用。
+
+        中文竖排一个字一个位置很难看，旋转整行才是排版做法；Pillow 没有文字旋转，
+        只能先画到一张小图上再转。
+        """
+        if not text:
+            return
+        s = self.scale
+        font = self.fonts.get(size, bold=True)
+        probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+        box = probe.textbbox((0, 0), text, font=font)
+        tw, th = box[2] - box[0] + 4, box[3] - box[1] + 4
+        tile = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((-box[0] + 2, -box[1] + 2), text, font=font, fill=fill)
+        tile = tile.rotate(90, expand=True)
+        self.img.paste(
+            tile,
+            (int(x * s) - tile.width // 2, int(y * s) - tile.height // 2),
+            tile,
+        )
 
     def text(
         self,
@@ -488,6 +561,7 @@ BRACKET_BOX_H = 62
 BRACKET_GAP = 46  # 列间水平空隙，连线画在这里
 BRACKET_VGAP = 22  # 同列上下两场的距离（要放得下下一场的日期行）
 BRACKET_HEAD = 15  # 每场上面那行日期
+BRACKET_LINE = "#2f6b86"  # 晋级线：比灰线更有方向感，又不抢胜方的蓝
 
 
 def _bracket_box(
@@ -498,10 +572,16 @@ def _bracket_box(
     y: float,
     w: float,
 ) -> None:
-    """一场比赛画成一个双行小块：上队一行、下队一行，胜方金色。"""
-    canvas.text(x, y - BRACKET_HEAD + 1, match.clock, 10, fill=DIM)
-    if match.best_of:
-        canvas.text_right(x + w, y - BRACKET_HEAD + 1, f"BO{match.best_of}", 10, fill=DIM)
+    """一场比赛画成一个双行小块：上队一行、下队一行，胜方整行填色。
+
+    填色而不是只给文字上色，是因为这张图经常被平台压到手机宽度的一半，
+    13px 的字到那时候已经糊了，色块还认得出。
+    """
+    canvas.text(x, y - BRACKET_HEAD + 1, match.clock, 9.5, fill=DIM)
+    parts = [f"#{match.id}" if match.id else "", f"BO{match.best_of}" if match.best_of else ""]
+    tail = " · ".join(part for part in parts if part)
+    if tail:
+        canvas.text_right(x + w, y - BRACKET_HEAD + 1, tail, 9.5, fill=DIM)
 
     top = y
     canvas.rrect(x, top, w, BRACKET_BOX_H, radius=6, fill=PANEL)
@@ -513,14 +593,17 @@ def _bracket_box(
         )
     ):
         row = index * (BRACKET_BOX_H // 2) + 4
-        # 只有「已开打并且赢了」才镀金；未开打和对阵未定都用中性灰
+        # 只有「已开打并且赢了」才填色；未开打和对阵未定都用中性灰
         decided = match.started
-        fill = WIN if decided and won else MUTED
+        fill = SD_BLUE if decided and won else SD_DARK
+        ink = "#ffffff" if decided and won else MUTED
+        canvas.rrect(x + 3, top + row - 1, w - 6, BRACKET_BOX_H // 2, radius=4, fill=fill)
         canvas.icon(
             x + 6,
             top + row,
             20,
             None if match.pending else icons.get(flag),
+            radius=3,
             placeholder="" if match.pending else name[:2],
             size_hint=8,
             bg=PANEL_2,
@@ -530,7 +613,7 @@ def _bracket_box(
             top + row + 3,
             canvas.fit(name, 13, w - 74, bold=won),
             13,
-            fill=fill,
+            fill=ink,
             bold=won and decided,
         )
         canvas.text_right(
@@ -538,11 +621,39 @@ def _bracket_box(
             top + row + 3,
             str(score) if decided else "–",
             13,
-            fill=fill,
+            fill=ink,
             bold=won and decided,
         )
-        if index == 0:
-            canvas.line(x + 6, top + BRACKET_BOX_H // 2, x + w - 6, top + BRACKET_BOX_H // 2)
+
+
+def _stack_column(wanted: list[float], top: float, pitch: float) -> list[float]:
+    """把一列按下标摆开：先按期望位置排序，挤住就往下推，最后整列拉回重心。"""
+    if not wanted:
+        return []
+    order = sorted(range(len(wanted)), key=lambda k: wanted[k])
+    placed = [0.0] * len(wanted)
+    cursor = top
+    for k in order:
+        y = max(wanted[k], cursor)
+        placed[k] = y
+        cursor = y + pitch
+    if len(wanted) > 1:
+        shift = (sum(wanted) - sum(placed)) / len(wanted)
+        placed = [y + shift for y in placed]
+    lowest = min(placed)
+    if lowest < top:
+        placed = [y + (top - lowest) for y in placed]
+    return placed
+
+
+def _edge_from_winner(parent: Match, child: Match) -> bool | None:
+    """连线是不是「上一场的胜者往上走」。两队都没名的占位场次返回 ``None``。"""
+    for team in (child.team_a, child.team_b):
+        if team and team in (parent.team_a, parent.team_b):
+            if not parent.finished:
+                return None
+            return parent.winner == team
+    return None
 
 
 def bracket_card(
@@ -570,26 +681,34 @@ def bracket_card(
     used = box_w * len(cols) + BRACKET_GAP * (len(cols) - 1)
     x0 = (WIDTH - used) / 2
 
-    # 先算纵向坐标：首列等距铺开，其余列对准它父级的中心
-    ys: list[list[float]] = []
-    top = PAD + 74
-    ys.append([top + i * (BRACKET_BOX_H + BRACKET_VGAP) for i in range(len(cols[0]))])
-    for index in range(1, len(cols)):
-        prev = ys[index - 1]
-        column: list[float] = []
-        for j in range(len(cols[index])):
-            parents = bracket_parents(len(prev), j)
-            if parents:
-                center = sum(prev[p] + BRACKET_BOX_H / 2 for p in parents) / len(parents)
-                column.append(center - BRACKET_BOX_H / 2)
-            else:  # 理论上不会发生；保底按首列间距铺，别叠在一起
-                column.append(top + j * (BRACKET_BOX_H + BRACKET_VGAP))
-        ys.append(column)
-
-    height = max(max(c) for c in ys) + BRACKET_BOX_H + 30 + PAD
-    canvas = Canvas(fonts, WIDTH, height)
+    top = PAD + 88
+    pitch = BRACKET_BOX_H + BRACKET_VGAP
     rounds = bracket_rounds(cols)
     edges = bracket_edges(cols, strict=bracket_strict(cols))
+
+    # 纵向位置：首列等距铺开，其余每场对准**真实来路**的中心。
+    # 不能按 j//2 算——双败赛段（MSI 淘汰赛 7→4）那个位置关系根本不存在，
+    # 按位置摆会出现「比赛悬在两条无关的线之间」。
+    feeders: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for (pc, pr), (cc, cr) in edges:
+        if cc == pc + 1:
+            feeders.setdefault((cc, cr), []).append((pc, pr))
+
+    ys: list[list[float]] = [[top + i * pitch for i in range(len(cols[0]))]]
+    for index in range(1, len(cols)):
+        prev = ys[index - 1]
+        wanted: list[float] = []
+        for j in range(len(cols[index])):
+            parents = feeders.get((index, j))
+            if parents:
+                center = sum(prev[p] + BRACKET_BOX_H / 2 for _, p in parents) / len(parents)
+                wanted.append(center - BRACKET_BOX_H / 2)
+            else:  # 对阵未定的场次没有来路，按位置兜底
+                wanted.append(top + j * pitch)
+        ys.append(_stack_column(wanted, top, pitch))
+
+    height = int(max(max(c) for c in ys) + BRACKET_BOX_H + 40 + PAD)
+    canvas = Canvas(fonts, WIDTH, height)
 
     canvas.text(PAD, PAD, title, 22, bold=True)
     if subtitle:
@@ -604,13 +723,28 @@ def bracket_card(
         mid = (left + right) / 2
         py = ys[pc][pr] + BRACKET_BOX_H / 2
         cy = ys[cc][cr] + BRACKET_BOX_H / 2
-        canvas.line(left + 3, py, mid, py, fill=LINE)
-        canvas.line(mid, py, mid, cy, fill=LINE)
-        canvas.line(mid, cy, right - 3, cy, fill=LINE)
+        # 双败赛段里「输着掉下来」和「赢着升上去」是两种去向，线得分开：
+        # 入围赛 4 队就是双败，全画灰线的话，谁从胜者组掉下来完全看不出来
+        won = _edge_from_winner(cols[pc][pr], cols[cc][cr])
+        tone = BRACKET_LINE if won is not False else SD_AMBER
+        dash = 0 if won is not False else 4.0
+        canvas.seg(left + 3, py, mid, py, fill=tone, width=1.3, dash=dash)
+        canvas.seg(mid, py, mid, cy, fill=tone, width=1.3, dash=dash)
+        canvas.seg(mid, cy, right - 3, cy, fill=tone, width=1.3, dash=dash)
 
     for index, col in enumerate(cols):
         x = x0 + index * (box_w + BRACKET_GAP)
-        canvas.text(x + 2, top - 40, rounds[index], 11, fill=WIN, bold=True)
+        canvas.text(x + 2, top - 46, rounds[index], 11, fill=WIN, bold=True)
+        days = [match.start_date for match in col if match.start_date]
+        if days:
+            head, tail = min(days), max(days)
+            canvas.text(
+                x + 2,
+                top - 31,
+                day_label(head) if head == tail else f"{head[5:]} ~ {tail[5:]}",
+                9,
+                fill=DIM,
+            )
         for j, match in enumerate(col):
             _bracket_box(canvas, icons, match, x, ys[index][j], box_w)
 
@@ -621,128 +755,425 @@ def bracket_card(
 
 # ---------------------------------------------------------------- 瑞士轮
 
-SWISS_ROW_H = 34
-SWISS_GROUP_H = 30
-SWISS_CHIP_W = 20
-SWISS_CHIP_GAP = 5
-SWISS_COL_GAP = 26
+# 一张「轮次跑道」：一列一轮，列内按赛前战绩分档（胜多在上），
+# 列间的连线就是每支队的去向——赢了走实线，输了走虚线。
+SD_CARD_W = 172
+SD_CARD_H = 66
+SD_HEAD_H = 18
+SD_ROW_H = 24
+SD_GAP = 112  # 列间净空，连线走廊
+SD_PITCH = 78  # 同档内相邻卡片的间距
+SD_BAND_GAP = 34  # 档与档之间
+SD_BAND_LABEL = 18  # 档位竖排标签占的宽度
+SD_PANEL_W = 292
+SD_PANEL_GAP = 44
 
-# 分组顺序即画出来的顺序：出线的在上面，还有机会的在中间，出局的在右边一列
-# 标题只用汉字加颜色：msyh / simhei 都不带 ✅⏳❌ 这些 emoji，
-# 画上去就是三个豆腐块，比不加还难看。
-SWISS_GROUPS = (
-    ("qualified", "晋级", WIN),
-    ("playing", "还有机会", MUTED),
-    ("eliminated", "淘汰", RED),
+SD_BLUE = "#24409c"  # 常规胜方
+SD_GREEN = "#0e6b44"  # 晋级胜方
+SD_DARK = "#12161e"  # 败方
+SD_RED_BG = "#3a121a"  # 淘汰败方
+SD_RED_TXT = "#ff6e80"
+SD_CYAN = "#3bc1ff"  # 胜者续战
+SD_AMBER = "#ffb020"  # 败者续战
+SD_BAND = "#182030"
+
+SD_DECIDE_TONE = {"adv": GREEN, "out": RED, "both": WIN}
+
+# 图例：(文字, 颜色, 线型)。线型为空表示画个色块。
+SD_LEGEND = (
+    ("晋级战", GREEN, ""),
+    ("淘汰战", RED, ""),
+    ("生死战", WIN, ""),
+    ("常规轮", DIM, ""),
+    ("胜者续战", SD_CYAN, "solid"),
+    ("败者续战", SD_AMBER, "dash"),
 )
 
 
-def _swiss_row(
+def _column_height(bands: list[list[SwissLane]]) -> float:
+    total = sum(len(band) * SD_CARD_H + (len(band) - 1) * (SD_PITCH - SD_CARD_H) for band in bands)
+    return total + (len(bands) - 1) * SD_BAND_GAP
+
+
+def _band_top(bands: list[list[SwissLane]], top: float, body: float) -> float:
+    """这一列纵向居中后的起点。列高不同，居中才对得齐中线。"""
+    return top + (body - _column_height(bands)) / 2
+
+
+def _swiss_bands(lanes: list[SwissLane]) -> list[list[SwissLane]]:
+    """按赛前战绩分档，胜多在上。档内保持传入的顺序（由重心排序决定）。"""
+    buckets: dict[tuple[int, int], list[SwissLane]] = {}
+    for lane in lanes:
+        buckets.setdefault(lane.band, []).append(lane)
+    return [buckets[key] for key in sorted(buckets, key=lambda b: (-b[0], b[1]))]
+
+
+def _swiss_layout(
+    columns: list[list[SwissLane]], top: float, body: float
+) -> tuple[list[list[list[SwissLane]]], list[list[float]]]:
+    """排位置：返回「每列的档」和「每张卡的中心 y」。
+
+    列内顺序不是随便排的——同一档里按邻列同队的位置做重心排序（推三轮），
+    线才不会交叉成一团。档是硬约束：胜场多的永远在上面，不为好看打乱。
+    """
+    bands = [_swiss_bands(column) for column in columns]
+    centers: list[list[float]] = [[0.0] * len(column) for column in columns]
+
+    def place() -> None:
+        for ci, column_bands in enumerate(bands):
+            y = top + (body - _column_height(column_bands)) / 2
+            index = 0
+            for band in column_bands:
+                for _ in band:
+                    centers[ci][index] = y + SD_CARD_H / 2
+                    index += 1
+                    y += SD_PITCH
+                y += SD_BAND_GAP - (SD_PITCH - SD_CARD_H)
+
+    def pull(ci: int, neighbour_ci: int) -> None:
+        """按邻列位置重排本列每一档内部的顺序。"""
+        where: dict[str, float] = {}
+        for k, lane in enumerate(columns[neighbour_ci]):
+            for team in (lane.match.team_a, lane.match.team_b):
+                where[team] = centers[neighbour_ci][k]
+        for band in bands[ci]:
+            band.sort(key=lambda lane: _pair_center(lane, where))
+
+    place()
+    for _ in range(2):
+        for ci in range(1, len(columns)):
+            pull(ci, ci - 1)
+            place()
+        for ci in range(len(columns) - 2, -1, -1):
+            pull(ci, ci + 1)
+            place()
+    return bands, centers
+
+
+def _pair_center(lane: SwissLane, where: dict[str, float]) -> float:
+    ys = [where[team] for team in (lane.match.team_a, lane.match.team_b) if team in where]
+    return sum(ys) / len(ys) if ys else 1e9
+
+
+def _swiss_edges(
+    columns: list[list[SwissLane]], centers: list[list[float]]
+) -> list[list[tuple[float, float, bool]]]:
+    """每条连线的两端 + 这条线是「赢着来的」还是「输着来的」。
+
+    线的两端落在**队自己那一行**的中心，不是卡片中心：两张卡各有两个队，
+    全连到卡片中点的话，两条线会在入口处并成一条，读者分不清哪条是哪个队。
+    """
+    corridors: list[list[tuple[float, float, bool]]] = []
+    for ci in range(1, len(columns)):
+        edges: list[tuple[float, float, bool]] = []
+        for ri, lane in enumerate(columns[ci]):
+            for side, team in enumerate((lane.match.team_a, lane.match.team_b)):
+                for pi, other in enumerate(columns[ci - 1]):
+                    sides = (other.match.team_a, other.match.team_b)
+                    if team in sides:
+                        theirs = sides.index(team)
+                        edges.append(
+                            (
+                                centers[ci - 1][pi] + _row_offset(theirs),
+                                centers[ci][ri] + _row_offset(side),
+                                other.winner == team,
+                            )
+                        )
+                        break
+        corridors.append(edges)
+    return corridors
+
+
+def _row_offset(side: int) -> float:
+    """卡片里第 ``side`` 行中心相对卡片中心的偏移。"""
+    return SD_HEAD_H + side * SD_ROW_H + SD_ROW_H / 2 - SD_CARD_H / 2
+
+
+def _rail_slots(edges: list[tuple[float, float, bool]]) -> list[int]:
+    """给同一条走廊里的线分配轨道，纵向区间不重叠才共轨。
+
+    长线优先挑轨道：短线贴着卡片走，视觉上不会跟长线缠成一束。
+    """
+    order = sorted(range(len(edges)), key=lambda k: -abs(edges[k][1] - edges[k][0]))
+    rails: list[list[float]] = []
+    slots = [0] * len(edges)
+    for k in order:
+        low, high = sorted((edges[k][0], edges[k][1]))
+        for index, (top, bottom) in enumerate(rails):
+            if high < top - 5 or low > bottom + 5:
+                rails[index] = [min(top, low), max(bottom, high)]
+                slots[k] = index
+                break
+        else:
+            rails.append([low, high])
+            slots[k] = len(rails) - 1
+    return slots
+
+
+def _swiss_lane_card(
     canvas: Canvas,
     icons: dict[str, bytes],
-    row: SwissRow,
+    lane: SwissLane,
     x: float,
     y: float,
 ) -> None:
-    """一队一行：色条、队标、队名、战绩，右边是自己走过的轮次。"""
-    tone = WIN if row.state == "qualified" else (RED if row.state == "eliminated" else MUTED)
-    dead = row.state == "eliminated"
-    canvas.rrect(x, y + 8, 3, 19, radius=1, fill=tone)
-    canvas.icon(
-        x + 10,
-        y + 5,
-        24,
-        icons.get(row.flag) if row.flag else None,
-        placeholder=row.team[:2],
-        size_hint=9,
-        bg=PANEL_2,
+    """一场对局：上面一行赢家、下面一行输家，胜方整行填色。
+
+    行填色比只给小分上色好读——缩到手机上一半大小时色块还在，数字已经糊了。
+    左边那条 3px 竖条标记这场的性质（晋级战绿 / 淘汰战红 / 生死战琥珀）。
+    """
+    match = lane.match
+    canvas.rrect(x, y, SD_CARD_W, SD_CARD_H, radius=6, fill=PANEL)
+
+    tone = SD_DECIDE_TONE.get(lane.decide)
+    if tone:
+        canvas.rrect(x, y + 7, 3, SD_CARD_H - 14, radius=1, fill=tone)
+
+    canvas.text(x + 8, y + 4, match.clock, 8.5, fill=DIM)
+    if match.id:
+        canvas.text_right(x + SD_CARD_W - 7, y + 4, f"#{match.id}", 8, fill=DIM)
+
+    win_a = match.score_a > match.score_b
+    rows = (
+        (match.team_a, match.flag_a, match.score_a, win_a),
+        (match.team_b, match.flag_b, match.score_b, not win_a),
     )
-    canvas.text(
-        x + 42,
-        y + 8,
-        canvas.fit(row.team, 13, 148, bold=True),
-        13,
-        fill=MUTED if dead else INK,
-        bold=True,
-    )
-    canvas.text_right(x + 250, y + 8, row.record, 13, fill=tone, bold=True)
-    for index, won in enumerate(row.path):
-        canvas.rrect(
-            x + 264 + index * (SWISS_CHIP_W + SWISS_CHIP_GAP),
-            y + 12,
-            SWISS_CHIP_W,
-            11,
+    for index, (name, flag, score, won) in enumerate(rows):
+        top = y + SD_HEAD_H + index * SD_ROW_H
+        fill = SD_DARK
+        ink = MUTED
+        if lane.decided and won:
+            fill = SD_GREEN if lane.decide in ("adv", "both") else SD_BLUE
+            ink = "#ffffff"
+        elif lane.decided and lane.decide in ("out", "both"):
+            fill = SD_RED_BG
+            ink = SD_RED_TXT
+        canvas.rrect(x + 3, top, SD_CARD_W - 6, SD_ROW_H, radius=4, fill=fill)
+        pending = is_tbd(name)
+        canvas.icon(
+            x + 7,
+            top + 4,
+            15,
+            None if pending else icons.get(flag),
             radius=3,
-            fill=GREEN if won else RED,
+            placeholder="" if pending else name[:2],
+            size_hint=7,
+            bg=PANEL_2,
+        )
+        canvas.text(
+            x + 26,
+            top + 4,
+            canvas.fit("待定" if pending else name, 11, SD_CARD_W - 60, bold=won),
+            11,
+            fill=ink,
+            bold=bool(won and lane.decided),
+        )
+        canvas.text_right(
+            x + SD_CARD_W - 8,
+            top + 3,
+            str(score) if lane.decided else "–",
+            11.5,
+            fill=ink,
+            bold=bool(won and lane.decided),
         )
 
 
-def swiss_card(
+def _standings_panel(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    standings: list[tuple[int, SwissRow]],
+    x: float,
+    y: float,
+    source: str,
+) -> float:
+    """右侧积分榜：名次、大场、小局、状态，晋级线画在出线与出局之间。"""
+    rows = len(standings)
+    height = 84 + rows * 26 + 24
+    canvas.rrect(x, y, SD_PANEL_W, height, radius=12, fill="#0e131c")
+
+    qualified = sum(1 for _, row in standings if row.state == "qualified")
+    eliminated = sum(1 for _, row in standings if row.state == "eliminated")
+    played = sum(row.wins + row.losses for _, row in standings) // 2
+    cells = (
+        ("晋级", str(qualified), GREEN),
+        ("淘汰", str(eliminated), RED),
+        ("场次", str(played), MUTED),
+    )
+    cell_w = (SD_PANEL_W - 24) / 3
+    for index, (label, value, tone) in enumerate(cells):
+        cx = x + 12 + index * cell_w
+        canvas.text(cx, y + 12, value, 18, fill=tone, bold=True)
+        canvas.text(cx + 1, y + 36, label, 9.5, fill=DIM)
+
+    canvas.line(x + 12, y + 52, x + SD_PANEL_W - 12, y + 52)
+
+    for label, cx in (
+        ("排名", x + 12),
+        ("战队", x + 44),
+        ("大场", x + 196),
+        ("小局", x + 244),
+        ("状态", x + SD_PANEL_W - 14),
+    ):
+        anchor = "lt" if cx < x + 100 else "rt"
+        canvas.text(cx, y + 62, label, 9, fill=DIM, anchor=anchor)
+
+    top = y + 84
+    for index, (rank, row) in enumerate(standings):
+        row_y = top + index * 26
+        if index:
+            canvas.line(x + 12, row_y, x + SD_PANEL_W - 12, row_y, fill="#1a2231")
+
+        # 晋级线：出线区与出局区之间划一刀，比让读者自己数「第 8 名」直观
+        if index == qualified and 0 < qualified < rows:
+            canvas.line(x + 12, row_y, x + SD_PANEL_W - 14, row_y, fill=RED)
+            canvas.text(x + 12, row_y - 10, "晋级线", 8, fill=RED)
+
+        tone = WIN if row.state == "qualified" else (RED if row.state == "eliminated" else MUTED)
+        canvas.rrect(x + 8, row_y + 6, 2.5, 14, radius=1, fill=tone)
+        canvas.text(x + 14, row_y + 5, str(rank), 10, fill=DIM, bold=True)
+        canvas.icon(
+            x + 36,
+            row_y + 5,
+            16,
+            icons.get(row.flag) if row.flag else None,
+            radius=3,
+            placeholder=row.team[:2],
+            size_hint=7,
+            bg=PANEL_2,
+        )
+        canvas.text(
+            x + 57,
+            row_y + 5,
+            canvas.fit(row.team, 10.5, 86, bold=True),
+            10.5,
+            fill=MUTED if row.state == "eliminated" else INK,
+            bold=True,
+        )
+        canvas.text_right(
+            x + 196,
+            row_y + 5,
+            row.record,
+            10.5,
+            fill=INK if row.state != "eliminated" else MUTED,
+            bold=True,
+        )
+        canvas.text_right(x + 244, row_y + 5, row.games, 9.5, fill=MUTED)
+        state_text = {"qualified": "晋级", "eliminated": "淘汰"}.get(row.state, "在争")
+        canvas.text_right(x + SD_PANEL_W - 14, row_y + 5, state_text, 9, fill=tone)
+
+    if source:
+        canvas.text(x + 14, y + height - 18, f"数据源 {source}", 8.5, fill=DIM)
+    return height
+
+
+def swiss_diagram_card(
     fonts: Fonts,
     icons: dict[str, bytes],
     *,
     title: str,
-    rows: list[SwissRow],
+    columns: list[list[SwissLane]],
+    standings: list[tuple[int, SwissRow]],
     subtitle: str = "",
     source: str = "",
 ) -> bytes | None:
-    """瑞士轮图：左边谁活着、右边谁回家，每队后面是自己那几轮的胜负格子。
+    """瑞士轮晋级图：一轮一列，列内按赛前战绩分档，右边榜单给最终去向。
 
-    画不成树的赛段以前只有一张流水清单——33 场逐条读下来，读者得自己在脑子里
-    记分。瑞士轮真正的问题是「谁出线了」，那就把答案直接摆出来：3 胜的镀金、
-    3 负的压暗，剩下的夹在中间。
+    为什么不是树：33 场按 1/2/4 反推是 ``[18,8,4,2,1]``，首列 18 场之间没有
+    「谁淘汰谁」的关系，硬画等于把 18 场编成八强。瑞士轮的真实结构是
+    「先到 3 胜出线、先到 3 负出局」，所以它是一条跑道——每支队顺着连线走到底，
+    走成绿的晋级、走成红的出局。
     """
-    if not fonts.available or not rows:
+    if not fonts.available or not columns or not standings:
         return None
 
-    buckets = [
-        (key, label, tone, [r for r in rows if r.state == key]) for key, label, tone in SWISS_GROUPS
-    ]
-    left = [item for item in buckets if item[0] in ("qualified", "playing") and item[3]]
-    right = [item for item in buckets if item[0] == "eliminated" and item[3]]
-    if not left and not right:
-        return None
+    rounds = len(columns)
+    body_w = rounds * SD_CARD_W + (rounds - 1) * SD_GAP
+    width = int(PAD + SD_BAND_LABEL + body_w + SD_PANEL_GAP + SD_PANEL_W + PAD)
+    body = max(_column_height(_swiss_bands(column)) for column in columns)
 
-    col_w = (WIDTH - PAD * 2 - SWISS_COL_GAP) / 2
-    head_h = 44 + (20 if subtitle else 0)
+    top = 126.0
+    height = int(top + body + 56)
+    canvas = Canvas(fonts, width, height)
 
-    def column_height(groups: list[tuple[str, str, str, list[SwissRow]]]) -> float:
-        if not groups:
-            return 0.0
-        return (
-            sum(SWISS_GROUP_H + len(items) * SWISS_ROW_H for _, _, _, items in groups)
-            + (len(groups) - 1) * 12
-        )
-
-    body = max(column_height(left), column_height(right))
-    height = PAD + head_h + body + 34 + PAD
-    canvas = Canvas(fonts, WIDTH, height)
-
-    canvas.text(PAD, PAD, title, 22, bold=True)
+    canvas.text(PAD, PAD, title, 20, bold=True)
     if subtitle:
-        canvas.text_right(WIDTH - PAD, PAD + 6, subtitle, 12, fill=MUTED)
+        canvas.text(PAD, PAD + 30, subtitle, 11, fill=MUTED)
 
-    top = PAD + head_h
-    for groups, x in ((left, PAD), (right, PAD + col_w + SWISS_COL_GAP)):
-        y = top
-        for _key, label, tone, items in groups:
-            canvas.text(x, y + 4, f"{label} {len(items)}", 13, fill=tone, bold=True)
-            y += SWISS_GROUP_H
-            for row in items:
-                _swiss_row(canvas, icons, row, x, y)
-                y += SWISS_ROW_H
-            y += 12
+    # 图例靠右：色块标性质，线型标「赢着来还是输着来」
+    lx = width - PAD
+    for label, tone, style in reversed(SD_LEGEND):
+        lx -= canvas.measure(label, 9)
+        canvas.text(lx, PAD + 6, label, 9, fill=DIM)
+        lx -= 14
+        if style == "solid":
+            canvas.seg(lx - 6, PAD + 11, lx + 6, PAD + 11, fill=tone, width=1.5)
+        elif style == "dash":
+            canvas.seg(lx - 6, PAD + 11, lx + 6, PAD + 11, fill=tone, width=1.2, dash=3.5)
+        else:
+            canvas.rrect(lx - 4, PAD + 7, 8, 8, radius=2, fill=tone)
+        lx -= 12
 
-    legend = "格子从左到右是第 1 轮起："
-    canvas.text(PAD, height - PAD - 14, legend, 11, fill=DIM)
-    legend_w = canvas.measure(legend, 11)
-    canvas.rrect(PAD + legend_w + 4, height - PAD - 10, 14, 8, radius=2, fill=GREEN)
-    canvas.text(PAD + legend_w + 22, height - PAD - 14, "胜", 11, fill=DIM)
-    canvas.rrect(PAD + legend_w + 48, height - PAD - 10, 14, 8, radius=2, fill=RED)
-    canvas.text(PAD + legend_w + 66, height - PAD - 14, "负", 11, fill=DIM)
+    canvas.line(PAD, 84, width - PAD, 84)
 
-    if source:
-        canvas.text_right(WIDTH - PAD, height - PAD - 14, f"数据源 {source}", 11, fill=DIM)
+    bands, centers = _swiss_layout(columns, top, body)
+    dates = swiss_round_dates(columns)
+    xs = [PAD + SD_BAND_LABEL + ci * (SD_CARD_W + SD_GAP) for ci in range(rounds)]
+
+    # 三遍画，顺序即层级：档底 → 连线 → 卡片。
+    # 线画在档底之上，才会一路顶到卡片左缘；画在档底之下就会在档边断掉，
+    # 读者看不出这条线到底是进这场，还是停在半空。
+    for ci, band_list in enumerate(bands):
+        x = xs[ci]
+        canvas.text(x, top - 34, f"第 {ci + 1} 轮", 11, fill=WIN, bold=True)
+        canvas.text(x, top - 19, dates[ci], 9, fill=DIM)
+        y = _band_top(bands[ci], top, body)
+        for band in band_list:
+            band_h = _column_height([band])
+            canvas.rrect(
+                x - SD_BAND_LABEL,
+                y - 6,
+                SD_CARD_W + SD_BAND_LABEL + 5,
+                band_h + 12,
+                radius=8,
+                fill=SD_BAND,
+            )
+            wins, losses = band[0].wins, band[0].losses
+            tone = GREEN if wins > losses else (RED if wins < losses else BLUE)
+            canvas.rrect(x - SD_BAND_LABEL, y - 6, 2.5, band_h + 12, radius=1, fill=tone)
+            canvas.vtext(
+                x - SD_BAND_LABEL / 2 - 1,
+                y + band_h / 2,
+                f"{wins} 胜 {losses} 负",
+                8,
+                fill=tone,
+            )
+            y += band_h + SD_BAND_GAP
+
+    for ci, edges in enumerate(_swiss_edges(columns, centers), 1):
+        slots = _rail_slots(edges)
+        left = xs[ci - 1] + SD_CARD_W
+        # 线停在档条边上而不是卡片边上：档条背后是同一档的比赛，
+        # 停在档口读起来是「进这一组」，穿过档条则会压住竖排标签
+        right = xs[ci] - SD_BAND_LABEL + 3
+        span = max(24.0, right - left - 12)
+        for k, (y0, y1, won) in enumerate(edges):
+            rail = min(slots[k], 9)
+            xr = left + 9 + rail * span / 9
+            tone = SD_CYAN if won else SD_AMBER
+            dash = 0 if won else 4.0
+            canvas.seg(left, y0, xr, y0, fill=tone, width=1.4, dash=dash)
+            canvas.seg(xr, y0, xr, y1, fill=tone, width=1.4, dash=dash)
+            canvas.seg(xr, y1, right, y1, fill=tone, width=1.4, dash=dash)
+
+    for ci in range(rounds):
+        x = xs[ci]
+        y = _band_top(bands[ci], top, body)
+        for band in bands[ci]:
+            for index, lane in enumerate(band):
+                _swiss_lane_card(canvas, icons, lane, x, y + index * SD_PITCH)
+            y += _column_height([band]) + SD_BAND_GAP
+
+    _standings_panel(canvas, icons, standings, width - PAD - SD_PANEL_W, top - 34, source)
     return canvas.to_bytes()
 
 
@@ -1544,22 +1975,26 @@ class CardRenderer:
         self,
         *,
         title: str,
-        rows: list[SwissRow],
+        columns: list[list[SwissLane]],
+        standings: list[tuple[int, SwissRow]],
         subtitle: str = "",
         source: str = "",
     ) -> bytes | None:
-        """瑞士轮图。画不成树的赛段里有相当一部分其实是瑞士轮。"""
+        """瑞士轮晋级图。画不成树的赛段里有相当一部分其实是瑞士轮。"""
         if not self.available:
             self._fail()
             return None
         try:
-            flags = [row.flag for row in rows if row.flag]
-            icons = await self.store.warm(flags)
-            return swiss_card(
+            flags = [lane.match.flag_a for column in columns for lane in column]
+            flags += [lane.match.flag_b for column in columns for lane in column]
+            flags += [row.flag for _, row in standings if row.flag]
+            icons = await self.store.warm([flag for flag in flags if flag])
+            return swiss_diagram_card(
                 self.fonts,
                 icons,
                 title=title,
-                rows=rows,
+                columns=columns,
+                standings=standings,
                 subtitle=subtitle,
                 source=source,
             )
