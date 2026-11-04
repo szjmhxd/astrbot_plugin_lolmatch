@@ -31,6 +31,7 @@ from .models import (
     MARK_TEXT,
     DoubleElim,
     Game,
+    KnockoutRow,
     Match,
     MatchDetail,
     PlayerStat,
@@ -589,6 +590,140 @@ MARK_TONE = {
     MARK_RUNNER: "#a8b6c8",
 }
 
+# 淘汰赛右侧面板（双败 / 单败共用）：最终名次 / 当前积分。
+# 宽度与瑞士轮积分榜一致，整套图里两张榜长得一样，读者不用重新学。
+KO_PANEL_W = 292
+KO_PANEL_GAP = 44
+KO_ROW_H = 36  # 每队两行：名次 / 队名 / 战绩，下面跟一行旅程线
+
+# 状态徽章：(文字色, 底色)。徽章是实心药丸，缩图后仍认得出冠军在哪。
+KO_BADGE = {
+    "冠军": ("#221a03", BRACKET_GOLD),
+    "亚军": ("#1b2430", "#c9d4e4"),
+    "四强": ("#0b1c33", "#58a6ff"),
+    "八强": ("#d5dde8", "#2b3543"),
+    "十六强": ("#d5dde8", "#2b3543"),
+    "在战": ("#0d2818", "#3fb950"),
+}
+
+
+def _knockout_panel_height(rows: int) -> float:
+    return 118 + rows * KO_ROW_H + 26
+
+
+def _knockout_panel(
+    canvas: Canvas,
+    icons: dict[str, bytes],
+    rows: list[KnockoutRow],
+    x: float,
+    y: float,
+    *,
+    total: int,
+    double: bool,
+    bo: int = 0,
+    source: str = "",
+) -> float:
+    """右侧「最终名次 / 当前积分」面板：三格统计 + 名次表 + 每队旅程线。
+
+    画法对标赛事官网的名次板：先看冠军和赛制，再看每队走到哪。
+    旅程线是这个面板存在的理由——双败图里两支队的负场数一样，
+    看不出谁是从败者组爬回来的；「胜 C9 → 胜 MVK → 负 KC」一行讲完一支队的路。
+    """
+    height = _knockout_panel_height(len(rows))
+    canvas.rrect(x, y, KO_PANEL_W, height, radius=12, fill="#0e131c")
+
+    finished = any(row.state == "champion" for row in rows)
+    champion = next((row.team for row in rows if row.state == "champion"), "")
+    canvas.text(x + 12, y + 12, "最终名次" if finished else "当前积分", 13, bold=True, fill=INK)
+
+    rule = "两败出局" if double else "一败出局"
+    bo_text = f"全程 BO{bo}" if bo else ("双败" if double else "单败")
+    canvas.text(
+        x + 12,
+        y + 33,
+        f"{len(rows)} 队 · {total} 场 · {bo_text} · {rule}",
+        9,
+        fill=DIM,
+    )
+
+    cells = (
+        ("冠军", champion or "待定", WIN if champion else DIM),
+        ("总场次", str(total), MUTED),
+        ("赛制", f"BO{bo}" if bo else ("双败" if double else "单败"), MUTED),
+    )
+    cell_w = (KO_PANEL_W - 24) / 3
+    for index, (label, value, tone) in enumerate(cells):
+        cx = x + 12 + index * cell_w
+        canvas.text(
+            cx, y + 52, canvas.fit(value, 15, cell_w - 8, bold=True), 15, fill=tone, bold=True
+        )
+        canvas.text(cx + 1, y + 76, label, 9, fill=DIM)
+
+    canvas.line(x + 12, y + 92, x + KO_PANEL_W - 12, y + 92)
+
+    for label, cx in (
+        ("名次", x + 12),
+        ("战队", x + 44),
+        ("大场", x + 196),
+        ("小局", x + 244),
+    ):
+        canvas.text(cx, y + 100, label, 9, fill=DIM)
+    canvas.text_right(x + KO_PANEL_W - 14, y + 100, "状态", 9, fill=DIM)
+
+    top = y + 118
+    for index, row in enumerate(rows):
+        row_y = top + index * KO_ROW_H
+        if index:
+            canvas.line(x + 12, row_y, x + KO_PANEL_W - 12, row_y, fill="#1a2231")
+
+        gone = row.state == "out"
+        tone = MUTED if gone else INK
+        rank_text = str(row.rank) if row.rank else "—"
+        canvas.text(x + 14, row_y + 5, rank_text, 10, fill=DIM, bold=True)
+        canvas.icon(
+            x + 36,
+            row_y + 5,
+            16,
+            icons.get(row.flag) if row.flag else None,
+            radius=3,
+            placeholder=row.team[:2],
+            size_hint=7,
+            bg=PANEL_2,
+        )
+        canvas.text(
+            x + 57,
+            row_y + 5,
+            canvas.fit(row.team, 10.5, 86, bold=True),
+            10.5,
+            fill=tone,
+            bold=True,
+        )
+        canvas.text_right(x + 196, row_y + 5, row.record, 10.5, fill=tone, bold=True)
+        canvas.text_right(x + 244, row_y + 5, row.games, 9.5, fill=MUTED)
+
+        badge = row.badge
+        ink_badge, bg_badge = KO_BADGE.get(badge, ("#d5dde8", "#2b3543"))
+        bw = canvas.measure(badge, 8.5, bold=True) + 12
+        canvas.rrect(x + KO_PANEL_W - 14 - bw, row_y + 4, bw, 15, radius=7.5, fill=bg_badge)
+        canvas.text(
+            x + KO_PANEL_W - 14 - bw + 6, row_y + 5.5, badge, 8.5, fill=ink_badge, bold=True
+        )
+
+        if row.path_text:
+            # 旅程线占整行的第二行，右边到徽章列都是空的——放开到接近全宽，
+            # 「胜 TSW → 胜 G2 → 负 BLG → 胜 Lyon → 胜 BLG」这种五段路一行放下
+            canvas.text(
+                x + 34,
+                row_y + 22,
+                canvas.fit(row.path_text, 7.5, KO_PANEL_W - 62),
+                7.5,
+                fill=DIM,
+            )
+
+    if source:
+        canvas.text(x + 14, y + height - 18, f"数据源 {source}", 8.5, fill=DIM)
+    return height
+
 
 def _bracket_box(
     canvas: Canvas,
@@ -727,10 +862,13 @@ def bracket_card(
     marks: dict[str, tuple[str, str]] | None = None,
     subtitle: str = "",
     source: str = "",
+    standings: list[KnockoutRow] | None = None,
 ) -> bytes | None:
     """单败晋级图：横向多列，列间画直角连线，胜方高亮，未定的写「待定」。
 
     列宽随列数自适应，但封顶 320——两列的赛段别拉成一整条长砖。
+    ``standings`` 给出时右侧加「最终名次」面板：树管「谁赢了谁」，
+    榜管「每支队走到哪」，一张图回答两个问题。
     """
     if not fonts.available or not columns:
         return None
@@ -773,8 +911,14 @@ def bracket_card(
                 wanted.append(top + j * pitch)
         ys.append(_stack_column(wanted, top, pitch))
 
-    height = int(max(max(c) for c in ys) + BRACKET_BOX_H + 40 + PAD)
-    canvas = Canvas(fonts, WIDTH, height)
+    body_h = max(max(c) for c in ys) + BRACKET_BOX_H + 40 + PAD
+    panel_x = WIDTH - PAD + KO_PANEL_GAP
+    height = int(max(body_h, PAD + _knockout_panel_height(len(standings or [])) + PAD))
+    canvas = Canvas(
+        fonts,
+        int(panel_x + KO_PANEL_W + PAD) if standings else WIDTH,
+        height,
+    )
 
     canvas.text(PAD, PAD, title, 22, bold=True)
     if subtitle:
@@ -833,7 +977,21 @@ def bracket_card(
                 gold=match is champion,
             )
 
-    if source:
+    if standings:
+        bo = max((match.best_of for match in (m for c in cols for m in c)), default=0)
+        _knockout_panel(
+            canvas,
+            icons,
+            standings,
+            panel_x,
+            PAD,
+            total=sum(len(col) for col in cols),
+            double=False,
+            bo=bo,
+            source=source,
+        )
+
+    if source and not standings:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
     return canvas.to_bytes()
 
@@ -865,16 +1023,21 @@ DK_WIN_EDGE = "#2d51c8"
 DK_LOSE_EDGE = "#c98a1e"
 
 
-def _deck_metrics(cols: int) -> tuple[float, float]:
-    """双败图的卡宽与列间距：列多就收窄，别把图拉成一条长墙。"""
+def _deck_metrics(cols: int, *, reserve: float = 0.0) -> tuple[float, float]:
+    """双败图的卡宽与列间距：列多就收窄，别把图拉成一条长墙。
+
+    ``reserve`` 是右侧积分面板要占的宽度——面板是固定宽度，
+    得从列的预算里先扣掉，否则 6 列双败 + 面板会把整张图顶出屏幕。
+    """
     gap = float(DK_GAP)
     card_w = float(DK_CARD_W)
+    limit = DK_MAX_W - reserve
     total = PAD * 2 + cols * card_w + (cols - 1) * gap
-    if total > DK_MAX_W and cols > 1:
-        gap = max(56.0, gap - (total - DK_MAX_W) / (cols - 1))
+    if total > limit and cols > 1:
+        gap = max(56.0, gap - (total - limit) / (cols - 1))
         total = PAD * 2 + cols * card_w + (cols - 1) * gap
-    if total > DK_MAX_W:
-        card_w = (DK_MAX_W - PAD * 2 - (cols - 1) * gap) / cols
+    if total > limit:
+        card_w = (limit - PAD * 2 - (cols - 1) * gap) / cols
     return max(196.0, card_w), gap
 
 
@@ -928,12 +1091,16 @@ def double_elim_card(
     marks: dict[str, tuple[str, str]],
     subtitle: str = "",
     source: str = "",
+    standings: list[KnockoutRow] | None = None,
 ) -> bytes | None:
     """双败赛段：上胜者组、下败者组、右总决赛，连线是每支队的去向。
 
     列 = **轮次**，不是日期。日期分列在 4 队 6 场上好看（参考资料就是这么画的），
     到 8 队 14 场、跨 7 个比赛日就崩：同一棵树被切成 7 列，一条「胜决 → 总决赛」
     的线要横穿四列，图上会糊成一团。按轮次排，最长的一条线也只跨两列。
+
+    ``standings`` 给出时右侧加「当前积分 / 最终名次」面板——双败图的核心疑问
+    是「谁掉下来过、怎么爬回来的」，旅程线比负场数回答得直接。
     """
     if not fonts.available:
         return None
@@ -956,7 +1123,8 @@ def double_elim_card(
     lose_offset = 1
     span = max(len(win_cols) + win_offset, len(lose_cols) + lose_offset)
     cols = span + (1 if layout.final else 0)
-    card_w, gap = _deck_metrics(cols)
+    panel_extra = KO_PANEL_GAP + KO_PANEL_W if standings else 0.0
+    card_w, gap = _deck_metrics(cols, reserve=panel_extra)
     pitch = BRACKET_BOX_H + BRACKET_VGAP
 
     head = PAD + 76  # 内容顶：给标题、图例和列头留位置
@@ -964,10 +1132,13 @@ def double_elim_card(
     lose_top = head + (win_h + DK_BAND_GAP if win_h else 0)
     lose_h = _band_height(lose_cols, pitch)
     content_bottom = lose_top + lose_h
-    height = int(content_bottom + 52 + PAD)
+    height = int(
+        max(content_bottom + 52 + PAD, PAD + _knockout_panel_height(len(standings or [])) + PAD)
+    )
 
-    canvas = Canvas(fonts, int(PAD * 2 + cols * card_w + (cols - 1) * gap), height)
-    right = canvas.width - PAD
+    body_right = PAD + cols * card_w + (cols - 1) * gap
+    canvas = Canvas(fonts, int(body_right + panel_extra + PAD), height)
+    right = body_right  # 标题、图例的右锚点是图区右缘，不是画布右缘——面板还在右边
 
     canvas.text(PAD, PAD, title, 22, bold=True)
     if subtitle:
@@ -1114,7 +1285,21 @@ def double_elim_card(
             gold=match is final,
         )
 
-    if source:
+    if standings:
+        bo = max((match.best_of for match in every), default=0)
+        _knockout_panel(
+            canvas,
+            icons,
+            standings,
+            body_right + KO_PANEL_GAP,
+            PAD,
+            total=len(every),
+            double=True,
+            bo=bo,
+            source=source,
+        )
+
+    if source and not standings:
         canvas.text(PAD, height - PAD - 10, f"数据源 {source}", 11, fill=DIM)
     return canvas.to_bytes()
 
@@ -2259,6 +2444,7 @@ class CardRenderer:
         limit: int = 20,
         source: str = "",
         subtitle: str = "",
+        show_id: bool = False,
     ) -> bytes | None:
         if not self.available:
             self._fail()
@@ -2273,6 +2459,7 @@ class CardRenderer:
                 limit=limit,
                 source=source,
                 subtitle=subtitle,
+                show_id=show_id,
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)
@@ -2318,6 +2505,7 @@ class CardRenderer:
         marks: dict[str, tuple[str, str]] | None = None,
         subtitle: str = "",
         source: str = "",
+        standings: list[KnockoutRow] | None = None,
     ) -> bytes | None:
         """赛段晋级图。"""
         if not self.available:
@@ -2334,6 +2522,7 @@ class CardRenderer:
                 marks=marks or {},
                 subtitle=subtitle,
                 source=source,
+                standings=standings,
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)
@@ -2347,6 +2536,7 @@ class CardRenderer:
         marks: dict[str, tuple[str, str]],
         subtitle: str = "",
         source: str = "",
+        standings: list[KnockoutRow] | None = None,
     ) -> bytes | None:
         """双败淘汰图：上胜者组、下败者组、右总决赛。"""
         if not self.available:
@@ -2365,6 +2555,7 @@ class CardRenderer:
                 marks=marks,
                 subtitle=subtitle,
                 source=source,
+                standings=standings,
             )
         except Exception as exc:  # noqa: BLE001
             self._fail(exc)

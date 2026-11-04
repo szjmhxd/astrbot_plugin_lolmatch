@@ -42,6 +42,7 @@ from .lol.models import (
     day_label,
     detect_format,
     double_elim_split,
+    knockout_rows,
     match_marks,
     paginate_by_day,
     stage_groups,
@@ -414,6 +415,8 @@ class LolMatchPlugin(Star):
         )
         label = self._label(used)
         images = await self._schedule_cards(f"{day_str[5:]} 赛程", matches, limit, label)
+        # 赛程说「今天有什么」，晋级图说「这些人打到哪了」——一起给
+        images += await self._current_stage_cards(conf, matches, label)
         if images:
             # 有图就不用再把整张列表念一遍，一句话说明场次就够
             if matches:
@@ -436,6 +439,7 @@ class LolMatchPlugin(Star):
         )
         label = self._label(used)
         images = await self._schedule_cards("LOL 近期赛程", matches, limit, label)
+        images += await self._current_stage_cards(conf, matches, label)
         if images:
             return f"🗓 LOL 近期赛程　共 {len(matches)} 场　数据源 {label}", images
         return text
@@ -445,9 +449,72 @@ class LolMatchPlugin(Star):
             return []
         subtitle = f"只列前 {limit} 场" if limit > 0 and len(matches) > limit else ""
         png = await self._cards.schedule(
-            title=title, matches=matches, limit=limit, source=source, subtitle=subtitle
+            title=title,
+            matches=matches,
+            limit=limit,
+            source=source,
+            subtitle=subtitle,
+            show_id=True,
         )
         return [png] if png else []
+
+    async def _current_stage_cards(self, conf: dict, matches, source: str) -> list[bytes]:
+        """今日 / 本周附带的「当前赛段」晋级图。
+
+        赛程卡回答「什么时候打」，晋级图回答「打到哪了」，一次问答里两个都有。
+        每个联赛只挑一个赛段：优先含今天 / 本周比赛的那个（用户问的就是这些场），
+        其次是「已开打但没打完」的赛段（正在进行时），都没有就取最后一个有赛果的。
+        最多两个联赛——一天七八个联赛都附图的话，消息直接刷成图墙。
+        """
+        if self._cards is None or not self._cards.available or not matches:
+            return []
+        assert self._hub is not None
+
+        by_tid: dict[str, list] = {}
+        for match in matches:
+            if match.tournament_id:
+                by_tid.setdefault(match.tournament_id, []).append(match)
+        top = sorted(by_tid.items(), key=lambda kv: len(kv[1]), reverse=True)[:2]
+
+        out: list[bytes] = []
+        limit = self._cfg_int("tournament_card_limit", 36)
+        for tid, day_items in top:
+            try:
+                _, full = await self._hub.call(
+                    "schedule",
+                    provider=conf["provider"],
+                    token=conf["token"],
+                    tournament_id=tid,
+                )
+            except Exception:  # noqa: BLE001 - 附图失败不影响赛程本身
+                continue
+            if not full:
+                continue
+            groups = [
+                (name, items) for name, items in stage_groups(full) if stage_has_result(items)
+            ]
+            if not groups:
+                continue
+            ids = {match.id for match in day_items}
+            target = next(
+                ((name, items) for name, items in groups if any(m.id in ids for m in items)),
+                None,
+            )
+            if target is None:
+                # 「打完了但还有没打的」= 正在进行中的赛段
+                target = next(
+                    ((name, items) for name, items in groups if any(not m.finished for m in items)),
+                    None,
+                )
+            if target is None:
+                target = groups[-1]
+            name = (day_items[0].tournament_name if day_items else "") or f"联赛 {tid}"
+            out.extend(
+                await self._stage_cards(
+                    name, target[0], target[1], source, limit, diagram_only=True
+                )
+            )
+        return out
 
     async def _cmd_detail(self, umo: str, rest: list[str]) -> str | tuple[str, list[bytes]]:
         token = rest[0] if rest else ""
@@ -572,15 +639,20 @@ class LolMatchPlugin(Star):
         return notes
 
     async def _stage_cards(
-        self, name: str, stage: str, items, source: str, limit: int
+        self, name: str, stage: str, items, source: str, limit: int, *, diagram_only: bool = False
     ) -> list[bytes]:
-        """单个赛段的一张图：单败树 / 双败双轨 / 瑞士轮跑道 → 清单，逐级降级。"""
+        """单个赛段的一张图：单败树 / 双败双轨 / 瑞士轮跑道 → 清单，逐级降级。
+
+        ``diagram_only`` 时清单兜底不出图——今日 / 本周附带的晋级图要的是
+        「打到哪了」，重复一遍赛程清单没有意义。
+        """
         assert self._cards is not None
         days = sorted({m.start_date for m in items if m.start_date})
         span = day_label(days[0]) if len(days) == 1 else f"{days[0][5:]} ~ {days[-1][5:]}"
         title = f"{name} · {stage}"
         fmt = detect_format(items)
         marks = match_marks(items, fmt) if fmt else {}
+        standings = knockout_rows(items, fmt) if fmt in (FORMAT_SINGLE, FORMAT_DOUBLE) else []
 
         # 双败：两条轨道 + 总决赛。**必须先于单败判断**——双败的场次形状
         # 也是「1、2、4 递减」，当成单败画会变成一棵歪树，败者组那几场
@@ -597,6 +669,7 @@ class LolMatchPlugin(Star):
                         f"（橙色虚线），两败出局　{span}"
                     ),
                     source=source,
+                    standings=standings or None,
                 )
                 if png:
                     return [png]
@@ -609,6 +682,7 @@ class LolMatchPlugin(Star):
                 marks=marks,
                 subtitle=f"{len(items)} 场 · 单败淘汰｜一败出局　{span}",
                 source=source,
+                standings=standings or None,
             )
             if png:
                 return [png]
@@ -631,6 +705,8 @@ class LolMatchPlugin(Star):
                 return [png]
 
         # 兜底：画不成图的赛段老老实实列清单，一场都不能少
+        if diagram_only:
+            return []
         pages = paginate_by_day(items, limit)
         out: list[bytes] = []
         for index, page in enumerate(pages, 1):

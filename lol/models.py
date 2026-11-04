@@ -675,6 +675,202 @@ def match_marks(matches: list[Match], fmt: str) -> dict[str, tuple[str, str]]:
     return marks
 
 
+# ---------------------------------------------------------------- 淘汰赛积分
+
+
+@dataclass(slots=True)
+class KnockoutRow:
+    """一支队在淘汰赛（单败 / 双败）里的战绩、旅程与名次。
+
+    ``path`` 是按时间顺序的每场「胜负 + 对手」，面板上画成
+    「胜 C9 → 胜 MVK → 负 KC」的旅程线——单看 3-1 这个大场数，
+    分不出这支队是一路横扫，还是输一场掉进败者组再爬回来的。
+
+    ``rank`` 为 0 表示名次未定（还在打）；同轮出局的队共享名次，
+    和正式赛事排名惯例一致（八强赛四支败者同列 5-8 名）。
+    """
+
+    team: str = ""
+    flag: str = ""
+    wins: int = 0
+    losses: int = 0
+    game_wins: int = 0
+    game_losses: int = 0
+    path: list[tuple[bool, str]] = field(default_factory=list)  # (胜?, 对手)
+    rank: int = 0
+    state: str = "playing"  # champion / runner / out / playing
+
+    @property
+    def record(self) -> str:
+        return f"{self.wins}-{self.losses}"
+
+    @property
+    def games(self) -> str:
+        return f"{self.game_wins}-{self.game_losses}"
+
+    @property
+    def diff(self) -> int:
+        return self.game_wins - self.game_losses
+
+    @property
+    def path_text(self) -> str:
+        """旅程线文字：「胜 C9 → 胜 MVK → 负 KC」。"""
+        return " → ".join(f"{'胜' if won else '负'} {foe}" for won, foe in self.path)
+
+    @property
+    def badge(self) -> str:
+        """名次段徽章。按名次段而不是按赛制细节叫——
+        1 冠军、2 亚军、3-4 四强、5-8 八强，单败双败通用。"""
+        if not self.rank:
+            return "在战"
+        if self.rank == 1:
+            return "冠军"
+        if self.rank == 2:
+            return "亚军"
+        if self.rank <= 4:
+            return "四强"
+        if self.rank <= 8:
+            return "八强"
+        if self.rank <= 16:
+            return "十六强"
+        return f"{self.rank} 名"
+
+
+def knockout_rows(matches: list[Match], fmt: str | None = None) -> list[KnockoutRow]:
+    """淘汰赛的每队积分 / 旅程 / 名次，双败、单败的右侧面板用。
+
+    名次按**淘汰轮次**分段共享：同一轮出局的队同名次，越晚出局名次越好。
+    打完没打完都出榜——进行中的赛段冠军栏写「待定」，名次只发给已经出局的队
+    （还在打的队不预发 1、2 名，那是在替没打完的比赛宣布结果）。
+    """
+    ordered = sorted(matches, key=lambda m: (m.start_date, m.start_time, m.id))
+    if not ordered:
+        return []
+    fmt = fmt or detect_format(ordered) or FORMAT_SINGLE
+
+    # ---- 淘汰轮次键：单败用晋级图的列号，双败用败者组的深度轮次。
+    # 名次段的满员数按**结构**算而不是实际出局人数：半决赛只打完一场时，
+    # 那支败者占的是「3-4 名」段，另一场还没打，不预支下一段的名次。
+    round_of: dict[str, int] = {}
+    band_size: dict[int, int] = {}
+    if fmt == FORMAT_SINGLE:
+        cols = bracket_columns(ordered) or []
+        for ci, col in enumerate(cols):
+            band_size[ci] = len(col)
+            for match in col:
+                if match.id:
+                    round_of[match.id] = ci
+    else:
+        # 败者组每场恰好淘汰一队（败者带着第二败离场），轮次用深度回推：
+        # 该场轮次 = max(双方上一轮轮次) + 1，和双败图的败者组分列同一套算法
+        layout = double_elim_split(ordered)
+        depth: dict[str, int] = {}
+        for match in layout.loser:
+            key = max(depth.get(match.team_a, 0), depth.get(match.team_b, 0)) + 1
+            if match.id:
+                round_of[match.id] = key
+            band_size[key] = band_size.get(key, 0) + 1
+            for team in (match.team_a, match.team_b):
+                if team and not is_tbd(team):
+                    depth[team] = key
+
+    # ---- 大场 / 小局 / 旅程，只认有赛果的场
+    rows: dict[str, KnockoutRow] = {}
+    elim: dict[str, str] = {}  # 队名 -> 把它淘汰掉的那场的 id
+
+    def row_for(team: str, flag: str = "") -> KnockoutRow | None:
+        if not team or is_tbd(team):
+            return None
+        row = rows.get(team)
+        if row is None:
+            row = rows[team] = KnockoutRow(team=team)
+        if flag and not row.flag:
+            row.flag = flag
+        return row
+
+    for match in ordered:
+        row_a = row_for(match.team_a, match.flag_a)
+        row_b = row_for(match.team_b, match.flag_b)
+        if row_a is None or row_b is None:
+            continue
+        if not match.finished or match.pending or match.score_a == match.score_b:
+            continue
+        won_a = match.score_a > match.score_b
+        row_a.game_wins += match.score_a
+        row_a.game_losses += match.score_b
+        row_b.game_wins += match.score_b
+        row_b.game_losses += match.score_a
+        row_a.path.append((won_a, match.team_b))
+        row_b.path.append((not won_a, match.team_a))
+        if won_a:
+            row_a.wins += 1
+            row_b.losses += 1
+        else:
+            row_b.wins += 1
+            row_a.losses += 1
+        loser_row = row_b if won_a else row_a
+        out_now = (
+            loser_row.losses >= 2
+            if fmt != FORMAT_SINGLE
+            else loser_row.losses >= 1 and match is not ordered[-1]
+        )
+        if out_now and loser_row.team not in elim:
+            elim[loser_row.team] = match.id
+
+    # ---- 冠军 / 亚军：双败、单败都认「最后一场」为决赛（与 match_marks 同一口径）
+    final = ordered[-1]
+    if final.finished and not final.pending and final.score_a != final.score_b:
+        won_a = final.score_a > final.score_b
+        champ = row_for(final.team_a if won_a else final.team_b)
+        runner = row_for(final.team_b if won_a else final.team_a)
+        if champ is not None:
+            champ.rank = 1
+            champ.state = "champion"
+        if runner is not None:
+            runner.rank = 2
+            runner.state = "runner"
+
+    # ---- 出局队按淘汰轮次分段共享名次。段起点按**结构满员**算，
+    # 空段也占位：半决赛还没打完时，首轮败者已经是「5-8 名」段的人，
+    # 不能预支「3-4 名」的名次——那是在替没打完的比赛发奖
+    if fmt == FORMAT_SINGLE and band_size:
+        final_key = max(band_size)  # 决赛列 = 1、2 名，不进出局段
+        rank_keys = [key for key in sorted(band_size, reverse=True) if key != final_key]
+    else:
+        rank_keys = sorted(band_size, reverse=True)
+    start_rank: dict[int, int] = {}
+    tail = 3
+    for key in rank_keys:
+        start_rank[key] = tail
+        tail += band_size[key]
+
+    groups: dict[int, list[KnockoutRow]] = {}
+    for team, match_id in elim.items():
+        row = rows.get(team)
+        if row is None or row.state in ("champion", "runner"):
+            continue
+        groups.setdefault(round_of.get(match_id, 0), []).append(row)
+    for key, members in groups.items():
+        base = start_rank.get(key, 3)
+        for row in members:
+            row.rank = base
+            row.state = "out"
+
+    # ---- 展示顺序：冠亚 → 还在打的（胜场多的在前）→ 出局的按名次
+    order_state = {"champion": 0, "runner": 1, "playing": 2, "out": 3}
+    return sorted(
+        rows.values(),
+        key=lambda r: (
+            order_state.get(r.state, 4),
+            r.rank or 99,
+            -r.wins,
+            r.losses,
+            -r.diff,
+            r.team,
+        ),
+    )
+
+
 def status_text(status: int) -> str:
     if 0 <= status < len(STATUS_TEXT):
         return STATUS_TEXT[status]
