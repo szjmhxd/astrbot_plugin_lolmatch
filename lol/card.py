@@ -1374,10 +1374,17 @@ def _band_top(bands: list[list[SwissLane]], top: float, body: float) -> float:
 
 
 def _swiss_bands(lanes: list[SwissLane]) -> list[list[SwissLane]]:
-    """按赛前战绩分档，胜多在上。档内保持传入的顺序（由重心排序决定）。"""
+    """按赛前战绩分档，胜多在上；同一档内按开赛时间排序。
+
+    档内时间序是读图的硬约定：同一轮同一个战绩档，谁先开打谁在上。
+    进来的 lanes 本身就是时间序，这里再显式排一次——分档逻辑不该
+    依赖上游恰好有序。
+    """
     buckets: dict[tuple[int, int], list[SwissLane]] = {}
     for lane in lanes:
         buckets.setdefault(lane.band, []).append(lane)
+    for bucket in buckets.values():
+        bucket.sort(key=lambda lane: (lane.match.start_date, lane.match.start_time, lane.match.id))
     return [buckets[key] for key in sorted(buckets, key=lambda b: (-b[0], b[1]))]
 
 
@@ -1386,62 +1393,43 @@ def _swiss_layout(
 ) -> tuple[list[list[list[SwissLane]]], list[list[float]]]:
     """排位置：返回「每列的档」和「每张卡的中心 y」。
 
-    列内顺序不是随便排的——同一档里按邻列同队的位置做重心排序（推三轮），
-    线才不会交叉成一团。档是硬约束：胜场多的永远在上面，不为好看打乱。
+    列内顺序 = 分档（赛前战绩，胜多在上）→ 档内开赛时间。曾按邻列同队
+    的位置做重心排序压连线交叉，但那样档内顺序就跟比赛先后脱节——
+    读图的人按「这场几点开打」找场次，时间序比少几条交叉线重要。
+    ``centers`` 的下标按档展开序（与 ``_swiss_edges`` 一致）。
     """
     bands = [_swiss_bands(column) for column in columns]
     centers: list[list[float]] = [[0.0] * len(column) for column in columns]
-
-    def place() -> None:
-        for ci, column_bands in enumerate(bands):
-            y = top + (body - _column_height(column_bands)) / 2
-            index = 0
-            for band in column_bands:
-                for _ in band:
-                    centers[ci][index] = y + SD_CARD_H / 2
-                    index += 1
-                    y += SD_PITCH
-                y += SD_BAND_GAP - (SD_PITCH - SD_CARD_H)
-
-    def pull(ci: int, neighbour_ci: int) -> None:
-        """按邻列位置重排本列每一档内部的顺序。"""
-        where: dict[str, float] = {}
-        for k, lane in enumerate(columns[neighbour_ci]):
-            for team in (lane.match.team_a, lane.match.team_b):
-                where[team] = centers[neighbour_ci][k]
-        for band in bands[ci]:
-            band.sort(key=lambda lane: _pair_center(lane, where))
-
-    place()
-    for _ in range(2):
-        for ci in range(1, len(columns)):
-            pull(ci, ci - 1)
-            place()
-        for ci in range(len(columns) - 2, -1, -1):
-            pull(ci, ci + 1)
-            place()
+    for ci, column_bands in enumerate(bands):
+        y = top + (body - _column_height(column_bands)) / 2
+        index = 0
+        for band in column_bands:
+            for _ in band:
+                centers[ci][index] = y + SD_CARD_H / 2
+                index += 1
+                y += SD_PITCH
+            y += SD_BAND_GAP - (SD_PITCH - SD_CARD_H)
     return bands, centers
 
 
-def _pair_center(lane: SwissLane, where: dict[str, float]) -> float:
-    ys = [where[team] for team in (lane.match.team_a, lane.match.team_b) if team in where]
-    return sum(ys) / len(ys) if ys else 1e9
-
-
 def _swiss_edges(
-    columns: list[list[SwissLane]], centers: list[list[float]]
+    bands: list[list[list[SwissLane]]], centers: list[list[float]]
 ) -> list[list[tuple[float, float, bool]]]:
     """每条连线的两端 + 这条线是「赢着来的」还是「输着来的」。
 
-    线的两端落在**队自己那一行**的中心，不是卡片中心：两张卡各有两个队，
-    全连到卡片中点的话，两条线会在入口处并成一条，读者分不清哪条是哪个队。
+    行序跟 ``centers`` 一样按**档展开序**走，不是上游的时间序——档内
+    时间序画图后卡片按档铺开，线端点必须对准卡片实际所在的高度，
+    否则线会接到别的卡上。线的两端落在**队自己那一行**的中心，不是
+    卡片中心：两张卡各有两个队，全连到卡片中点的话，两条线会在入口处
+    并成一条，读者分不清哪条是哪个队。
     """
+    rows = [[lane for band in column for lane in band] for column in bands]
     corridors: list[list[tuple[float, float, bool]]] = []
-    for ci in range(1, len(columns)):
+    for ci in range(1, len(rows)):
         edges: list[tuple[float, float, bool]] = []
-        for ri, lane in enumerate(columns[ci]):
+        for ri, lane in enumerate(rows[ci]):
             for side, team in enumerate((lane.match.team_a, lane.match.team_b)):
-                for pi, other in enumerate(columns[ci - 1]):
+                for pi, other in enumerate(rows[ci - 1]):
                     sides = (other.match.team_a, other.match.team_b)
                     if team in sides:
                         theirs = sides.index(team)
@@ -1722,7 +1710,7 @@ def swiss_diagram_card(
             )
             y += band_h + SD_BAND_GAP
 
-    for ci, edges in enumerate(_swiss_edges(columns, centers), 1):
+    for ci, edges in enumerate(_swiss_edges(bands, centers), 1):
         slots = _rail_slots(edges)
         left = xs[ci - 1] + SD_CARD_W
         # 线停在档条边上而不是卡片边上：档条背后是同一档的比赛，
