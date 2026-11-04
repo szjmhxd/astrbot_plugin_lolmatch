@@ -41,10 +41,12 @@ from .models import (
     bracket_edges,
     bracket_rounds,
     bracket_strict,
+    date_span,
     day_label,
     is_tbd,
     stage_groups,
     swiss_round_dates,
+    usage_hint,
 )
 
 try:
@@ -401,10 +403,10 @@ def _collect_urls(matches: list[Match], games: list[Game]) -> list[str]:
 
 # ---------------------------------------------------------------- 赛程卡
 
-HEAD_MAJOR = 26  # 阶段 / 联赛标题
-HEAD_MINOR = 22  # 日期小标题
-ROW_H = 46
-ROW_ID_H = 54  # 多一行比赛 ID
+HEAD_MAJOR = 22  # 阶段 / 联赛标题
+HEAD_MINOR = 18  # 日期小标题
+ROW_H = 42
+ROW_ID_H = 48  # 多一行比赛 ID
 
 
 def _schedule_blocks(matches: list[Match], limit: int, *, group: str) -> list[tuple[int, Any]]:
@@ -428,14 +430,15 @@ def _schedule_blocks(matches: list[Match], limit: int, *, group: str) -> list[tu
         return blocks
 
     # 跨天的列表把日期提到标题上，单天的就只留联赛名——否则每块都在重复
-    # 标题里已经写过的那个日期。
+    # 标题里已经写过的那个日期。联赛 ID 跟在名字后，照着就能发「联赛详情」。
     days = {m.start_date for m in shown}
-    grouped: dict[tuple[str, str], list[Match]] = {}
+    grouped: dict[tuple[str, str, str], list[Match]] = {}
     for match in shown:
-        key = (match.start_date, match.tournament_name or "其他联赛")
+        key = (match.start_date, match.tournament_name or "其他联赛", match.tournament_id)
         grouped.setdefault(key, []).append(match)
-    for (day, tournament), items in grouped.items():
-        head = f"{day_label(day)}　{tournament}" if len(days) > 1 else f"【{tournament}】"
+    for (day, tournament, tid), items in grouped.items():
+        tag = f" #{tid}" if tid else ""
+        head = f"{day_label(day)}　{tournament}{tag}" if len(days) > 1 else f"【{tournament}{tag}】"
         blocks.append((0, head))
         blocks.extend((-1, match) for match in items)
     return blocks
@@ -452,20 +455,20 @@ def _schedule_row(
     """一场比赛的条。左边时刻（可选再带一行比赛 ID），中间比分，两侧队标。"""
     height = ROW_ID_H if show_id else ROW_H
     canvas.rrect(PAD, y, WIDTH - PAD * 2, height - 4, radius=8, fill=PANEL)
-    clock_y = y + 9 if show_id else y + 12
+    clock_y = y + 8 if show_id else y + 10
     canvas.text(PAD + 14, clock_y, match.start_time or "--:--", 15, fill=INK, bold=True)
     if show_id:
-        # 11px + MUTED：聊天软件会把长图整体缩小，DIM 灰的 10px 缩完就看不清了，
+        # 10px + MUTED：聊天软件会把长图整体缩小，DIM 灰的 10px 缩完就看不清了，
         # 而这行编号正是「联赛详情」这张卡存在的理由之一。
-        canvas.text(PAD + 14, y + 31, f"#{match.id}", 11, fill=MUTED)
+        canvas.text(PAD + 14, y + 26, f"#{match.id}", 10, fill=MUTED)
     tag = f"BO{match.best_of}" if match.best_of else ""
     if tag:
-        canvas.text(PAD + 66, y + 15, tag, 10, fill=DIM)
+        canvas.text(PAD + 66, y + 13, tag, 10, fill=DIM)
     # 对阵未定的场次（淘汰赛后几轮）压暗：日期是真的，队伍还没定
     name_fill = MUTED if match.pending else INK
     canvas.icon(
         PAD + 96,
-        y + 10 if show_id else y + 8,
+        y + 9 if show_id else y + 6,
         26,
         None if match.pending else icons.get(match.flag_a),
         placeholder="" if match.pending else match.name_a[:2],
@@ -474,7 +477,7 @@ def _schedule_row(
     )
     canvas.text(
         PAD + 130,
-        y + 14 if show_id else y + 12,
+        y + 11 if show_id else y + 10,
         canvas.fit(match.name_a, 15, 200),
         15,
         fill=name_fill,
@@ -482,7 +485,7 @@ def _schedule_row(
     middle = match.score_line if match.started else "vs"
     canvas.text(
         WIDTH / 2,
-        y + 14 if show_id else y + 12,
+        y + 11 if show_id else y + 10,
         middle,
         15,
         fill=WIN if match.finished else MUTED,
@@ -491,14 +494,14 @@ def _schedule_row(
     )
     canvas.text_right(
         WIDTH - PAD - 48,
-        y + 14 if show_id else y + 12,
+        y + 11 if show_id else y + 10,
         canvas.fit(match.name_b, 15, 200),
         15,
         fill=name_fill,
     )
     canvas.icon(
         WIDTH - PAD - 40,
-        y + 10 if show_id else y + 8,
+        y + 9 if show_id else y + 6,
         26,
         None if match.pending else icons.get(match.flag_b),
         placeholder="" if match.pending else match.name_b[:2],
@@ -532,17 +535,17 @@ def schedule_card(
     body = sum(
         HEAD_MAJOR if level == 0 else HEAD_MINOR if level == 1 else row_h for level, _ in blocks
     )
-    head_h = 44 + (22 if subtitle else 0)
+    head_h = 40 + (20 if subtitle else 0)
     height = PAD + head_h + max(body, 40) + 26 + PAD
     canvas = Canvas(fonts, WIDTH, height)
 
     canvas.text(PAD, PAD, title, 24, bold=True)
     canvas.text_right(WIDTH - PAD, PAD + 8, f"共 {total or len(matches)} 场", 13, fill=MUTED)
 
-    y = PAD + 44
+    y = PAD + 40
     if subtitle:
         canvas.text(PAD, y, subtitle, 12, fill=MUTED)
-        y += 22
+        y += 20
     if not blocks:
         canvas.text(PAD, y + 10, "这一天没有比赛。", 16, fill=MUTED)
         return canvas.to_bytes()
@@ -561,7 +564,21 @@ def schedule_card(
 
     if source:
         canvas.text(PAD, height - PAD - 14, f"数据源 {source}", 11, fill=DIM)
+    first = matches[0] if matches else None
+    _foot_hint(
+        canvas,
+        usage_hint(first.tournament_id if first else "", first.id if first else ""),
+        height - PAD - 14,
+    )
     return canvas.to_bytes()
+
+
+def _foot_hint(canvas: Canvas, hint: str, y: float, *, right: float | None = None) -> None:
+    """图右下角的查询提示。跟「数据源」同一行，左源右提示。"""
+    if not hint:
+        return
+    edge = canvas.width - PAD if right is None else right
+    canvas.text_right(edge, y, canvas.fit(hint, 10, max(120.0, edge - PAD - 200)), 10, fill=DIM)
 
 
 # ---------------------------------------------------------------- 晋级图
@@ -957,14 +974,7 @@ def bracket_card(
         canvas.text(x + 2, top - 46, rounds[index], 11, fill=WIN, bold=True)
         days = [match.start_date for match in col if match.start_date]
         if days:
-            head, tail = min(days), max(days)
-            canvas.text(
-                x + 2,
-                top - 31,
-                day_label(head) if head == tail else f"{head[5:]} ~ {tail[5:]}",
-                9,
-                fill=DIM,
-            )
+            canvas.text(x + 2, top - 31, date_span(min(days), max(days)), 9, fill=DIM)
         for j, match in enumerate(col):
             _bracket_box(
                 canvas,
@@ -993,6 +1003,13 @@ def bracket_card(
 
     if source and not standings:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
+    flat = [match for col in cols for match in col]
+    _foot_hint(
+        canvas,
+        usage_hint(flat[0].tournament_id if flat else "", flat[0].id if flat else ""),
+        height - PAD - 12,
+        right=WIDTH - PAD,
+    )
     return canvas.to_bytes()
 
 
@@ -1301,6 +1318,11 @@ def double_elim_card(
 
     if source and not standings:
         canvas.text(PAD, height - PAD - 10, f"数据源 {source}", 11, fill=DIM)
+    _foot_hint(
+        canvas,
+        usage_hint(every[0].tournament_id if every else "", every[0].id if every else ""),
+        height - PAD - 10,
+    )
     return canvas.to_bytes()
 
 
@@ -1725,6 +1747,12 @@ def swiss_diagram_card(
             y += _column_height([band]) + SD_BAND_GAP
 
     _standings_panel(canvas, icons, standings, width - PAD - SD_PANEL_W, top - 34, source)
+    first = columns[0][0].match if columns and columns[0] else None
+    _foot_hint(
+        canvas,
+        usage_hint(first.tournament_id if first else "", first.id if first else ""),
+        height - PAD - 12,
+    )
     return canvas.to_bytes()
 
 
@@ -1932,6 +1960,7 @@ def match_card(
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
+    _foot_hint(canvas, usage_hint(match.tournament_id, match.id), height - PAD - 12)
     return canvas.to_bytes()
 
 
@@ -2278,6 +2307,7 @@ def game_card(
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
+    _foot_hint(canvas, usage_hint(match.tournament_id, match.id), height - PAD - 12)
     return canvas.to_bytes()
 
 

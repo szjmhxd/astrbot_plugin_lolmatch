@@ -51,6 +51,7 @@ from .lol.models import (
     swiss_ready,
     swiss_rows,
     swiss_standings,
+    usage_hint,
 )
 from .lol.notify import Notifier, mention_text, normalize_mention
 from .lol.provider import DataHub, normalize_provider
@@ -423,7 +424,8 @@ class LolMatchPlugin(Star):
                 brief = f"📅 {day_str[5:]}　共 {len(matches)} 场"
             else:
                 brief = f"📭 {day_str[5:]} 没有比赛"
-            return brief + f"　数据源 {label}", images
+            hint = usage_hint(matches[0].tournament_id, matches[0].id) if matches else ""
+            return brief + f"　数据源 {label}" + (f"\n💡 {hint}" if hint else ""), images
         return text
 
     async def _cmd_week(self, umo: str) -> str | tuple[str, list[bytes]]:
@@ -441,7 +443,9 @@ class LolMatchPlugin(Star):
         images = await self._schedule_cards("LOL 近期赛程", matches, limit, label)
         images += await self._current_stage_cards(conf, matches, label)
         if images:
-            return f"🗓 LOL 近期赛程　共 {len(matches)} 场　数据源 {label}", images
+            hint = usage_hint(matches[0].tournament_id, matches[0].id) if matches else ""
+            brief = f"🗓 LOL 近期赛程　共 {len(matches)} 场　数据源 {label}"
+            return brief + (f"\n💡 {hint}" if hint else ""), images
         return text
 
     async def _schedule_cards(self, title: str, matches, limit: int, source: str) -> list[bytes]:
@@ -604,7 +608,8 @@ class LolMatchPlugin(Star):
         pending = self._pending_stages(matches)
         if pending:
             brief += f"（{'、'.join(pending)} 尚无赛果，未出图）"
-        return f"{brief}　数据源 {source}"
+        hint = usage_hint(matches[0].tournament_id, matches[0].id) if matches else ""
+        return f"{brief}　数据源 {source}" + (f"\n💡 {hint}" if hint else "")
 
     async def _tournament_cards(self, name: str, matches, source: str) -> list[bytes]:
         """联赛详情图：**一个赛段一张**，赛程和晋级图在同一张里。

@@ -45,6 +45,30 @@ def day_label(day: str, *, with_year: bool = False) -> str:
     return f"{head} {_WEEKDAY[parsed.weekday()]}"
 
 
+def date_span(head: str, tail: str) -> str:
+    """列头日期区间：同天写一天，跨天两端都带周几。"""
+    if not head:
+        return ""
+    if not tail or head == tail:
+        return day_label(head)
+    return f"{day_label(head)} ~ {day_label(tail)}"
+
+
+def usage_hint(tournament_id: str | int = "", match_id: str | int = "") -> str:
+    """图右下角 / 文字末尾的查询提示，ID 用上下文里的真实值，照抄就能查。
+
+    三个指令各管一层：联赛 → 比赛 → 小局。ID 缺哪层就少写哪句，
+    空串返回空——没提示比提示一串占位符好。
+    """
+    parts = []
+    if tournament_id:
+        parts.append(f"用 /lol 联赛详情 {tournament_id} 查看联赛")
+    if match_id:
+        parts.append(f"用 /lol 详情 {match_id} 查看比赛")
+        parts.append(f"用 /lol 详情 {match_id} 1 查看小局")
+    return "　".join(parts)
+
+
 def stage_groups(matches: list[Match]) -> list[tuple[str, list[Match]]]:
     """按「比赛阶段」分组，顺序即首次出现的先后（赛程本身已按日期排好）。
 
@@ -434,7 +458,7 @@ def swiss_round_dates(columns: list[list[SwissLane]]) -> list[str]:
             out.append("")
             continue
         head, tail = min(days), max(days)
-        out.append(day_label(head) if head == tail else f"{head[5:]} ~ {tail[5:]}")
+        out.append(date_span(head, tail))
     return out
 
 
@@ -979,7 +1003,9 @@ class Match:
 
     @property
     def clock(self) -> str:
-        return f"{self.start_date[5:]} {self.start_time}".strip()
+        """带周几的开赛时刻（``11-04 周三 06:00``）——晋级图上一眼定位星期。"""
+        head = day_label(self.start_date) if self.start_date else ""
+        return f"{head} {self.start_time}".strip()
 
 
 @dataclass(slots=True)
