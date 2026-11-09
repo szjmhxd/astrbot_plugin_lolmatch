@@ -340,30 +340,59 @@ def detail_report(
         lines.append(f"💡 {usage_hint(match.tournament_id, match.id)}")
         return "\n".join(lines).strip()
 
-    # 选手表只留给最后一局：一场 BO5 若每局都列十个人，光选手就 100 行，
-    # 群里没人翻到底。前几局给资源对比，想细看某一局就带局号查。
-    detail_index = games[-1].index
-    for game in games:
-        show_squad = game.index == detail_index
-        lines.extend(
-            _game_block(
-                game,
-                match,
-                champ,
-                full=full and show_squad,
-                squads=show_squad,
+    if only:
+        # 带局号 = 我要看这一局：选手表、BP、时间线全给
+        for game in games:
+            lines.extend(_game_block(game, match, champ, full=full, squads=True))
+            lines.append("")
+    else:
+        # 不带局号 = 我要看这场比赛：总比分 + 每局战场概况。
+        # 以前这里会把最后一局的十人表也倒出来，等于「看比赛」实际给的是「看某局」——
+        # 想细看某局带局号就行，默认不该抢那一屏。
+        if match.started:
+            lines.append(
+                f"📊 总比分 {match.score_a} : {match.score_b}"
+                f"（BO{match.best_of or len(detail.games)}）"
             )
-        )
-        lines.append("")
-
-    if not only and len(games) > 1:
-        lines.append(f"… 选手数据只列了第 {detail_index} 局。")
-        lines.append(f"看其他局：{prefix} 详情 {match.id} <局号>")
+            lines.append("")
+        for game in detail.games:
+            lines.extend(_game_brief(game, match))
+        lines.append(f"看某一局逐人数据：{prefix} 详情 {match.id} <局号>")
 
     if source:
         lines.append(f"数据源 {source}")
     lines.append(f"💡 {usage_hint(match.tournament_id, match.id)}")
     return "\n".join(lines).strip()
+
+
+def _game_brief(game: Game, match: Match) -> list[str]:
+    """一局的压缩行：胜负 + 时长 + 人头/推塔/经济/小龙/大龙 + MVP。
+
+    详情的默认视图是「这场比赛怎么打的」，所以每局只留能横向对比的指标，
+    一行战果、一行资源，翻完 BO5 不到十行。
+    """
+    winner = {"a": match.team_a, "b": match.team_b}.get(game.win_side, "")
+    head = f"第 {game.index} 局"
+    if winner:
+        head += f" · {winner} 胜"
+    if game.clock:
+        head += f" · {game.clock}"
+    lines = [f"  {head}"]
+
+    stats = [f"人头 {game.kills_a} : {game.kills_b}"]
+    if game.enriched:  # 没取到明细时推塔是 0，不能当真 0 显示
+        stats.append(f"推塔 {game.tower_a} : {game.tower_b}")
+    stats.append(f"经济 {_gold(game.gold_a)} : {_gold(game.gold_b)}")
+    stats.append(f"小龙 {game.dragon_a} : {game.dragon_b}")
+    stats.append(f"大龙 {game.baron_a} : {game.baron_b}")
+    lines.append("    " + "　".join(stats))
+
+    mvp = game.mvp_player
+    if mvp is not None:
+        who = mvp.nickname or mvp.champion or "—"
+        detail_text = " · ".join(part for part in (mvp.champion, f"KDA {mvp.kda}") if part)
+        lines.append(f"    🏅 MVP {who}" + (f"（{detail_text}）" if detail_text else ""))
+    return lines
 
 
 def _game_block(

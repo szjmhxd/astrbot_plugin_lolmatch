@@ -542,16 +542,20 @@ class LolMatchPlugin(Star):
         return (text, images) if images else text
 
     async def _detail_cards(self, detail, *, only: int, source: str) -> list[bytes]:
-        """给详情配图：指定局就画那一局，否则画最后一局（决胜局信息最全）。"""
+        """给详情配图：指定局就画那一局的逐人明细，否则画整场总览。
+
+        不带局号是「这场比赛打得怎么样」——总比分 + 每局的人头/推塔/大小龙/MVP；
+        要看某局十个人的天赋出装，带局号。
+        """
         if self._cards is None or not self._cards.available:
             return []
-        if not detail.games:
-            png = await self._cards.match(detail, source=source)
+        if only:
+            games = [g for g in detail.games if g.index == only]
+            if not games:
+                return []
+            png = await self._cards.game(detail, games[0], source=source)
             return [png] if png else []
-        games = [g for g in detail.games if g.index == only] if only else detail.games[-1:]
-        if not games:
-            return []
-        png = await self._cards.game(detail, games[0], source=source)
+        png = await self._cards.match(detail, source=source)
         return [png] if png else []
 
     async def _cmd_tournaments(self, umo: str) -> str:

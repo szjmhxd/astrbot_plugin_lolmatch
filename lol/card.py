@@ -1913,14 +1913,15 @@ def match_card(
         y = _h2h_panel(canvas, h2h, y)
     columns = (
         ("局", PAD + 14, "lt"),
-        ("胜方", PAD + 72, "lt"),
-        ("时长", PAD + 130, "lt"),
-        ("击杀", PAD + 210, "lt"),
-        ("经济", PAD + 300, "lt"),
-        ("推塔", PAD + 410, "lt"),
-        ("小龙", PAD + 490, "lt"),
-        ("大龙", PAD + 570, "lt"),
-        ("潮虫", PAD + 650, "lt"),
+        ("胜方", PAD + 74, "lt"),
+        ("MVP", PAD + 140, "lt"),
+        ("时长", PAD + 262, "lt"),
+        ("人头", PAD + 330, "lt"),
+        ("经济", PAD + 400, "lt"),
+        ("推塔", PAD + 496, "lt"),
+        ("小龙", PAD + 552, "lt"),
+        ("大龙", PAD + 608, "lt"),
+        ("潮虫", PAD + 664, "lt"),
         ("伤害", PAD + 730, "lt"),
     )
     for label, x, anchor in columns:
@@ -1929,9 +1930,12 @@ def match_card(
     for game in games:
         canvas.line(PAD, y - 4, WIDTH - PAD, y - 4, fill=LINE)
         winner = {"a": match.team_a, "b": match.team_b}.get(game.win_side, "—")
+        mvp = game.mvp_player
+        mvp_text = (mvp.nickname or mvp.champion) if mvp else "—"
         values = (
             f"第 {game.index} 局",
             winner,
+            mvp_text,
             game.clock or "—",
             f"{game.kills_a}:{game.kills_b}",
             f"{_gold(game.gold_a)}:{_gold(game.gold_b)}",
@@ -1942,8 +1946,18 @@ def match_card(
             f"{_gold(game.damage_a)}:{_gold(game.damage_b)}",
         )
         for (label, x, anchor), value in zip(columns, values, strict=False):
-            color = INK if label != "局" else MUTED
-            canvas.text(x, y, canvas.fit(value, 13, 100), 13, fill=color, anchor=anchor)
+            if label == "局":
+                color = MUTED
+            elif label == "胜方":
+                # 胜方上绿：BO5 谁先到三局，扫一眼列就知道走势
+                color = WIN if winner != "—" else DIM
+            elif label == "MVP":
+                # 金色只给真正有 MVP 标记的行，缺数据时是灰的「—」
+                color = BRACKET_GOLD if mvp else DIM
+            else:
+                color = INK
+            limit = 112 if label == "MVP" else (106 if label == "伤害" else 90)
+            canvas.text(x, y, canvas.fit(value, 13, limit), 13, fill=color, anchor=anchor)
         y += 32
 
     if source:

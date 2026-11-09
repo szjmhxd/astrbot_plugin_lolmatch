@@ -1247,6 +1247,25 @@ class Game:
         """是否取到了逐局明细（BP、推塔、选手经济等）。"""
         return self.detailed
 
+    @property
+    def mvp_player(self) -> PlayerStat | None:
+        """这一局源站标的 MVP。没有逐局选手数据时返回 ``None``。
+
+        只认源站的 ``mvp`` 标记，不自己按 KDA 推算——评奖口径（伤害、参团、
+        关键团）跟 KDA 不是一回事，自己算出来的「MVP」会跟官方战报打架。
+        """
+        for player in (*self.players_a, *self.players_b):
+            if player.mvp:
+                return player
+        return None
+
+    @property
+    def mvp_name(self) -> str:
+        player = self.mvp_player
+        if player is None:
+            return ""
+        return player.nickname or player.champion
+
 
 @dataclass(slots=True)
 class MatchDetail:
