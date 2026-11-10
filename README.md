@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 插件名 | `astrbot_plugin_lolmatch` |
-| 版本 | v1.12.0 |
+| 版本 | v1.13.0 |
 | AstrBot | `>=4.16`（不设上限） |
 | 数据源 | 玩加赛事 scoregg（默认） / PandaScore（备选） |
 | 依赖 | `aiohttp`（AstrBot 内置）、`pillow`（画卡片，可选） |

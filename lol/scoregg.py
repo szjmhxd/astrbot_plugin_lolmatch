@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -244,7 +245,7 @@ class ScoreggProvider:
             raise ProviderError(f"scoregg 请求失败：{type(exc).__name__}: {exc}") from exc
 
         try:
-            body = __import__("json").loads(text)
+            body = json.loads(text)
         except ValueError as exc:
             raise ProviderError("scoregg 返回了非 JSON 内容（可能被风控拦截）") from exc
 
