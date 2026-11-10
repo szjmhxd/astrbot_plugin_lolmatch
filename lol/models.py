@@ -54,11 +54,11 @@ def date_span(head: str, tail: str) -> str:
     return f"{day_label(head)} ~ {day_label(tail)}"
 
 
-def usage_hint(tournament_id: str | int = "", match_id: str | int = "") -> str:
-    """图右下角 / 文字末尾的查询提示，ID 用上下文里的真实值，照抄就能查。
+def usage_hint_parts(tournament_id: str | int = "", match_id: str | int = "") -> list[str]:
+    """查询提示的几句命令，一句一行用。
 
     三个指令各管一层：联赛 → 比赛 → 小局。ID 缺哪层就少写哪句，
-    空串返回空——没提示比提示一串占位符好。
+    空列表表示没什么可提示的——没提示比提示一串占位符好。
     """
     parts = []
     if tournament_id:
@@ -66,7 +66,20 @@ def usage_hint(tournament_id: str | int = "", match_id: str | int = "") -> str:
     if match_id:
         parts.append(f"用 /lol 详情 {match_id} 查看比赛")
         parts.append(f"用 /lol 详情 {match_id} 1 查看小局")
-    return "　".join(parts)
+    return parts
+
+
+def usage_hint_block(tournament_id: str | int = "", match_id: str | int = "") -> str:
+    """文字输出尾部的提示块：💡 起头，一句命令一行，续行缩进对齐。
+
+    挤成一行时三条指令在手机上会自己折行，读的人分不清断在哪条命令中间；
+    一行一句，照着发不会发错，转述给别人也不会把两条命令粘成一条。
+    """
+    parts = usage_hint_parts(tournament_id, match_id)
+    if not parts:
+        return ""
+    head, *rest = parts
+    return "\n".join([f"💡 {head}", *(f"   {line}" for line in rest)])
 
 
 def stage_groups(matches: list[Match]) -> list[tuple[str, list[Match]]]:

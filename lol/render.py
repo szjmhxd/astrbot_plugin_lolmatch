@@ -28,7 +28,7 @@ from .models import (
     status_text,
     swiss_ready,
     swiss_rows,
-    usage_hint,
+    usage_hint_block,
 )
 from .windows import window_text
 
@@ -117,9 +117,9 @@ def day_report(
     if source:
         footer += f" · 数据源 {source}"
     lines.append(footer)
-    hint = usage_hint(shown[0].tournament_id, shown[0].id) if shown else ""
+    hint = usage_hint_block(shown[0].tournament_id, shown[0].id) if shown else ""
     if hint:
-        lines.append(f"💡 {hint}")
+        lines.append(hint)
     return "\n".join(lines).strip()
 
 
@@ -151,9 +151,9 @@ def week_report(matches: list[Match], *, days: int = 7, limit: int = 20, source:
     if source:
         footer += f" · 数据源 {source}"
     lines.append(footer)
-    hint = usage_hint(matches[0].tournament_id, matches[0].id) if matches else ""
+    hint = usage_hint_block(matches[0].tournament_id, matches[0].id) if matches else ""
     if hint:
-        lines.append(f"💡 {hint}")
+        lines.append(hint)
     return "\n".join(lines).strip()
 
 
@@ -277,9 +277,9 @@ def tournament_report(
     if bracket:
         lines.extend(bracket)
         lines.append("")
-    hint = usage_hint(matches[0].tournament_id, matches[0].id) if matches else ""
+    hint = usage_hint_block(matches[0].tournament_id, matches[0].id) if matches else ""
     if hint:
-        lines.append(f"💡 {hint}")
+        lines.append(hint)
     if source:
         lines.append(f"数据源 {source}")
     return "\n".join(lines).strip()
@@ -331,13 +331,13 @@ def detail_report(
         lines.append(note)
         if source:
             lines.append(f"\n数据源 {source}")
-        lines.append(f"💡 {usage_hint(match.tournament_id, match.id)}")
+        lines.append(usage_hint_block(match.tournament_id, match.id))
         return "\n".join(lines).strip()
 
     games = [g for g in detail.games if not only or g.index == only]
     if not games:
         lines.append(f"这场 BO{match.best_of or len(detail.games)} 没有第 {only} 局。")
-        lines.append(f"💡 {usage_hint(match.tournament_id, match.id)}")
+        lines.append(usage_hint_block(match.tournament_id, match.id))
         return "\n".join(lines).strip()
 
     if only:
@@ -361,7 +361,7 @@ def detail_report(
 
     if source:
         lines.append(f"数据源 {source}")
-    lines.append(f"💡 {usage_hint(match.tournament_id, match.id)}")
+    lines.append(usage_hint_block(match.tournament_id, match.id))
     return "\n".join(lines).strip()
 
 
@@ -693,7 +693,7 @@ def push_report(
         lines.append("")
         lines.append(f"数据源 {source}")
     first = (results or upcoming or [None])[0]
-    hint = usage_hint(first.tournament_id, first.id) if first else ""
+    hint = usage_hint_block(first.tournament_id, first.id) if first else ""
     if hint:
-        lines.append(f"💡 {hint}")
+        lines.append(hint)
     return "\n".join(lines).strip()

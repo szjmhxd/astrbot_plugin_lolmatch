@@ -46,7 +46,7 @@ from .models import (
     is_tbd,
     stage_groups,
     swiss_round_dates,
-    usage_hint,
+    usage_hint_parts,
 )
 
 try:
@@ -536,7 +536,7 @@ def schedule_card(
         HEAD_MAJOR if level == 0 else HEAD_MINOR if level == 1 else row_h for level, _ in blocks
     )
     head_h = 40 + (20 if subtitle else 0)
-    height = PAD + head_h + max(body, 40) + 26 + PAD
+    height = PAD + head_h + max(body, 40) + 26 + FOOT_PAD + PAD
     canvas = Canvas(fonts, WIDTH, height)
 
     canvas.text(PAD, PAD, title, 24, bold=True)
@@ -567,18 +567,29 @@ def schedule_card(
     first = matches[0] if matches else None
     _foot_hint(
         canvas,
-        usage_hint(first.tournament_id if first else "", first.id if first else ""),
+        usage_hint_parts(first.tournament_id if first else "", first.id if first else ""),
         height - PAD - 14,
     )
     return canvas.to_bytes()
 
 
-def _foot_hint(canvas: Canvas, hint: str, y: float, *, right: float | None = None) -> None:
-    """图右下角的查询提示。跟「数据源」同一行，左源右提示。"""
-    if not hint:
+FOOT_LINES = 3  # 查询提示最多三行：查联赛 / 查比赛 / 查小局
+FOOT_LEAD = 13  # 多行提示的行距（10px 字配 13 不挤）
+FOOT_PAD = (FOOT_LINES - 1) * FOOT_LEAD  # 提示往上叠，底部要额外让出的高度
+
+
+def _foot_hint(canvas: Canvas, lines: list[str], y: float, *, right: float | None = None) -> None:
+    """图右下角的查询提示：一句命令一行，从基线往上叠。
+
+    挤成一行时三条指令连成上百个字符，缩图后字号会被压到 7px 以下、糊成一坨；
+    分行之后每行都短，10px 能保住，读的人也能一条一条照着发。
+    """
+    if not lines:
         return
     edge = canvas.width - PAD if right is None else right
-    canvas.text_right(edge, y, canvas.fit(hint, 10, max(120.0, edge - PAD - 200)), 10, fill=DIM)
+    limit = max(120.0, edge - PAD - 200)
+    for index, line in enumerate(reversed(lines)):
+        canvas.text_right(edge, y - index * FOOT_LEAD, canvas.fit(line, 10, limit), 10, fill=DIM)
 
 
 # ---------------------------------------------------------------- 晋级图
@@ -930,7 +941,13 @@ def bracket_card(
 
     body_h = max(max(c) for c in ys) + BRACKET_BOX_H + 40 + PAD
     panel_x = WIDTH - PAD + KO_PANEL_GAP
-    height = int(max(body_h, PAD + _knockout_panel_height(len(standings or [])) + PAD))
+    height = int(
+        max(
+            body_h,
+            PAD + _knockout_panel_height(len(standings or [])) + FOOT_PAD + PAD,
+            body_h + FOOT_PAD,
+        )
+    )
     canvas = Canvas(
         fonts,
         int(panel_x + KO_PANEL_W + PAD) if standings else WIDTH,
@@ -1006,7 +1023,7 @@ def bracket_card(
     flat = [match for col in cols for match in col]
     _foot_hint(
         canvas,
-        usage_hint(flat[0].tournament_id if flat else "", flat[0].id if flat else ""),
+        usage_hint_parts(flat[0].tournament_id if flat else "", flat[0].id if flat else ""),
         height - PAD - 12,
         right=WIDTH - PAD,
     )
@@ -1150,7 +1167,10 @@ def double_elim_card(
     lose_h = _band_height(lose_cols, pitch)
     content_bottom = lose_top + lose_h
     height = int(
-        max(content_bottom + 52 + PAD, PAD + _knockout_panel_height(len(standings or [])) + PAD)
+        max(
+            content_bottom + 52 + FOOT_PAD + PAD,
+            PAD + _knockout_panel_height(len(standings or [])) + PAD,
+        )
     )
 
     body_right = PAD + cols * card_w + (cols - 1) * gap
@@ -1320,8 +1340,10 @@ def double_elim_card(
         canvas.text(PAD, height - PAD - 10, f"数据源 {source}", 11, fill=DIM)
     _foot_hint(
         canvas,
-        usage_hint(every[0].tournament_id if every else "", every[0].id if every else ""),
+        usage_hint_parts(every[0].tournament_id if every else "", every[0].id if every else ""),
         height - PAD - 10,
+        # 有面板时提示右缘贴图区右缘：贴画布右缘会画到面板里面去
+        right=body_right if standings else None,
     )
     return canvas.to_bytes()
 
@@ -1653,7 +1675,7 @@ def swiss_diagram_card(
     body = max(_column_height(_swiss_bands(column)) for column in columns)
 
     top = 126.0
-    height = int(top + body + 56)
+    height = int(top + body + 56 + FOOT_PAD)
     canvas = Canvas(fonts, width, height)
 
     canvas.text(PAD, PAD, title, 20, bold=True)
@@ -1738,8 +1760,10 @@ def swiss_diagram_card(
     first = columns[0][0].match if columns and columns[0] else None
     _foot_hint(
         canvas,
-        usage_hint(first.tournament_id if first else "", first.id if first else ""),
+        usage_hint_parts(first.tournament_id if first else "", first.id if first else ""),
         height - PAD - 12,
+        # 右侧积分榜占着画布右缘，提示得让到榜左侧
+        right=width - PAD - SD_PANEL_W - SD_PANEL_GAP if standings else None,
     )
     return canvas.to_bytes()
 
@@ -1852,7 +1876,7 @@ def match_card(
     games = detail.games
     h2h = detail.h2h if detail.h2h is not None and detail.h2h.ready else None
     h2h_block = 26 + len(h2h.recent(3)) * H2H_ROW + 10 + 10 if h2h else 0
-    height = PAD + 40 + 118 + h2h_block + 36 + len(games) * 32 + 30 + PAD
+    height = PAD + 40 + 118 + h2h_block + 36 + len(games) * 32 + 30 + FOOT_PAD + PAD
     canvas = Canvas(fonts, WIDTH, height)
 
     subtitle = " · ".join(
@@ -1962,7 +1986,7 @@ def match_card(
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
-    _foot_hint(canvas, usage_hint(match.tournament_id, match.id), height - PAD - 12)
+    _foot_hint(canvas, usage_hint_parts(match.tournament_id, match.id), height - PAD - 12)
     return canvas.to_bytes()
 
 
@@ -2112,6 +2136,7 @@ def game_card(
         + (56 if has_bans else 0)
         + sum(TEAM_HEAD + 26 + len(squad) * _player_rows(fonts) + 12 for _, squad, _ in squads)
         + 28
+        + FOOT_PAD
         + PAD
     )
     canvas = Canvas(fonts, WIDTH, height)
@@ -2309,7 +2334,7 @@ def game_card(
 
     if source:
         canvas.text(PAD, height - PAD - 12, f"数据源 {source}", 11, fill=DIM)
-    _foot_hint(canvas, usage_hint(match.tournament_id, match.id), height - PAD - 12)
+    _foot_hint(canvas, usage_hint_parts(match.tournament_id, match.id), height - PAD - 12)
     return canvas.to_bytes()
 
 
